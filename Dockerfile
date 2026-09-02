@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create conda environment with CadQuery (has all native deps bundled)
-RUN conda install -c conda-forge -c cadquery cadquery=2.4.0 -y && conda clean -afy
+RUN conda install -c conda-forge -c cadquery python=3.11 cadquery=2.4.0 -y && conda clean -afy
 
 # Python dependencies
 RUN pip install --no-cache-dir \
