@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdk-pixbuf-xlib-2.0-0 \
     libosmesa6 \
     libosmesa6-dev \
-    libglu1-mesa \h
+    libglu1-mesa \
     mesa-utils \
     libgomp1 \
     libtbb-dev \
