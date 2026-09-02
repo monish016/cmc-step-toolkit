@@ -2,7 +2,7 @@ FROM continuumio/miniconda3:latest
 
 # System dependencies for CadQuery/OpenCascade and rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+        libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
-    libgdk-pixbuf2.0-0 \
+        libgdk-pixbuf-xlib-2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create conda environment with CadQuery (has all native deps bundled)
