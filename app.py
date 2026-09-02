@@ -287,11 +287,15 @@ def analyze():
             "--out", json_path
         ], check=True, capture_output=True, text=True, timeout=120)
 
-        # 2. render views
-        subprocess.run([
-            "python3", os.path.join(script_dir, "generate_views.py"),
-            step_path, "--outdir", views_dir
-        ], check=True, capture_output=True, text=True, timeout=120)
+        # 2. render views (non-fatal - may OOM on limited memory)
+        try:
+            subprocess.run([
+                "python3", os.path.join(script_dir, "generate_views.py"),
+                step_path, "--outdir", views_dir
+            ], check=True, capture_output=True, text=True, timeout=120)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, Exception) as view_err:
+            print(f"Warning: View generation failed (non-fatal): {view_err}")
+            os.makedirs(views_dir, exist_ok=True)
 
         # 3. flat pattern
         subprocess.run([
