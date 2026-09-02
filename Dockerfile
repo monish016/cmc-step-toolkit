@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdk-pixbuf-xlib-2.0-0 \
     libosmesa6 \
     libosmesa6-dev \
-    libglu1-mesa \
+    libglu1-mesa \h
     mesa-utils \
     libgomp1 \
     libtbb-dev \
@@ -61,4 +61,4 @@ RUN mkdir -p /tmp/step_uploads
 EXPOSE 8080
 
 # Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "300", "--workers", "2", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "300", "--workers", "1", "app:app"]
