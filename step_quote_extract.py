@@ -35,25 +35,41 @@ from OCP.TopoDS import TopoDS
 # --------------------------------------------------------------------------
 def load_step(path):
     shape = importers.importStep(path)
-    solid = shape.val()
+    # Handle assemblies: if the STEP file contains multiple solids,
+    # fuse them or pick the largest by volume.
+    solids = shape.solids().vals()
+    if not solids:
+        raise ValueError("STEP file contains no solid bodies â possibly a wireframe or surface model.")
+    if len(solids) == 1:
+        solid = solids[0]
+    else:
+        # Multiple solids (assembly) â pick largest by volume for analysis
+        solid = max(solids, key=lambda s: abs(s.Volume()))
+        print(f"Warning: STEP file contains {len(solids)} solids (assembly). "
+              f"Analyzing the largest solid by volume.")
     return shape, solid
 
 
 def get_envelope(solid, density_g_cm3=7.9):
     bb = solid.BoundingBox()
-    vol_mm3 = solid.Volume()
+    vol_mm3 = abs(solid.Volume())  # abs() guards against reversed normals
+    if vol_mm3 < 1e-6:
+        raise ValueError("Solid has near-zero volume â degenerate or empty geometry.")
     vol_cm3 = vol_mm3 / 1000.0
     mass_g = vol_cm3 * density_g_cm3
     mass_lb = mass_g / 453.592
     area_mm2 = 0
     try:
-        # Sum all face areas for total surface area
         faces = cq.Workplane().add(solid).faces().vals()
-        area_mm2 = sum(f.Area() for f in faces)
+        area_mm2 = sum(abs(f.Area()) for f in faces)
     except Exception:
         pass
+    # Guard against degenerate bounding boxes
+    xlen = max(bb.xlen, 1e-6)
+    ylen = max(bb.ylen, 1e-6)
+    zlen = max(bb.zlen, 1e-6)
     return {
-        "bbox_mm": {"xlen": bb.xlen, "ylen": bb.ylen, "zlen": bb.zlen,
+        "bbox_mm": {"xlen": xlen, "ylen": ylen, "zlen": zlen,
                      "xmin": bb.xmin, "xmax": bb.xmax,
                      "ymin": bb.ymin, "ymax": bb.ymax,
                      "zmin": bb.zmin, "zmax": bb.zmax},
@@ -123,20 +139,28 @@ def classify_fab_type(shape, solid, envelope, planar, cyl, other):
       sub_type: None for sheet_metal; 'milling', 'turning', or 'mill_turn' for machined
     """
     bb = envelope["bbox_mm"]
-    dims = sorted([bb["xlen"], bb["ylen"], bb["zlen"]])
+    dims = sorted([max(bb["xlen"], 1e-6), max(bb["ylen"], 1e-6), max(bb["zlen"], 1e-6)])
     vol_mm3 = envelope["volume_mm3"]
-    bbox_vol = bb["xlen"] * bb["ylen"] * bb["zlen"]
-    fill_ratio = vol_mm3 / bbox_vol if bbox_vol > 0 else 0
+    bbox_vol = dims[0] * dims[1] * dims[2]
+    fill_ratio = vol_mm3 / bbox_vol if bbox_vol > 1e-9 else 0
 
     total_faces = len(planar) + len(cyl) + len(other)
-    planar_ratio = len(planar) / total_faces if total_faces else 0
-    cyl_ratio = len(cyl) / total_faces if total_faces else 0
+    if total_faces == 0:
+        return "machined", "low", "milling", ["no_faces_found"]
+    planar_ratio = len(planar) / total_faces
+    cyl_ratio = len(cyl) / total_faces
 
     # Aspect ratio: thinnest dimension vs average of other two
-    aspect_ratio = dims[0] / ((dims[1] + dims[2]) / 2) if (dims[1] + dims[2]) > 0 else 1
+    avg_other = (dims[1] + dims[2]) / 2
+    aspect_ratio = dims[0] / avg_other if avg_other > 1e-6 else 1.0
 
     # Check for bend faces (sheet metal signature)
-    cyl_infos = [(i, cyl_face_info(f, s)) for i, f, s in cyl]
+    cyl_infos = []
+    for i, f, s in cyl:
+        try:
+            cyl_infos.append((i, cyl_face_info(f, s)))
+        except Exception:
+            pass  # skip degenerate cylindrical faces
     vlens = sorted(info["v_len"] for _, info in cyl_infos) if cyl_infos else []
     n = len(vlens)
     small_half = vlens[:max(1, n // 2)] if vlens else [1.0]
@@ -352,7 +376,10 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
     # --- Holes: cylindrical faces with full or near-full revolution ---
     hole_groups = defaultdict(list)
     for i, f, surf in cyl:
-        info = cyl_face_info(f, surf)
+        try:
+            info = cyl_face_info(f, surf)
+        except Exception:
+            continue  # skip degenerate faces
         if info["u_sweep_deg"] > 350:  # Full revolution = hole or shaft
             # Group by radius (within tolerance)
             r_key = round(info["radius"], 1)
@@ -443,7 +470,10 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
 
     # --- Slots: partial cylindrical faces (arcs < 360) that aren't bend faces ---
     for i, f, surf in cyl:
-        info = cyl_face_info(f, surf)
+        try:
+            info = cyl_face_info(f, surf)
+        except Exception:
+            continue
         if 10 < info["u_sweep_deg"] < 350:
             # Partial cylinder â could be a slot end or fillet
             if info["radius"] < 20 and info["v_len"] > 1.0:
@@ -514,7 +544,12 @@ def detect_bend_faces(cyl, thickness_hint=None):
     """
     Auto-detect the sheet-metal bend cylindrical faces.
     """
-    infos = [(i, cyl_face_info(f, s)) for i, f, s in cyl]
+    infos = []
+    for i, f, s in cyl:
+        try:
+            infos.append((i, cyl_face_info(f, s)))
+        except Exception:
+            pass  # skip degenerate faces
     vlens = sorted(info["v_len"] for _, info in infos)
     n = len(vlens)
     small_half = vlens[: max(1, n // 2)]
@@ -567,7 +602,6 @@ def detect_bend_faces(cyl, thickness_hint=None):
 
 
 # --------------------------------------------------------------------------
---------------------------
 # CROSS-SECTION + WIRE WALK -> flat/bend segment sequence (sheet metal)
 # --------------------------------------------------------------------------
 def dominant_bend_axis(bend_lines):
@@ -827,10 +861,21 @@ def classify_cluster(members):
 # 5. MAIN DRIVER â unified entry point
 # ==========================================================================
 def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json"):
-    shape, solid = load_step(step_path)
+    try:
+        shape, solid = load_step(step_path)
+    except ValueError as e:
+        # Re-raise with clear message for the caller
+        raise
+    except Exception as e:
+        raise ValueError(f"Failed to load STEP file: {e}")
+
     envelope = get_envelope(solid, density)
 
-    faces_list, planar, cyl, other = classify_faces(shape)
+    try:
+        faces_list, planar, cyl, other = classify_faces(shape)
+    except Exception as e:
+        print(f"Warning: Face classification failed: {e}")
+        faces_list, planar, cyl, other = [], [], [], []
 
     # --- Auto-classify fab type ---
     fab_type, confidence, sub_type, reasons = classify_fab_type(
@@ -851,10 +896,14 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
         },
     }
 
-    if fab_type == "sheet_metal":
-        result.update(run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor))
-    else:
-        result.update(run_machined(shape, solid, envelope, faces_list, planar, cyl, other, sub_type))
+    try:
+        if fab_type == "sheet_metal":
+            result.update(run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor))
+        else:
+            result.update(run_machined(shape, solid, envelope, faces_list, planar, cyl, other, sub_type))
+    except Exception as e:
+        print(f"Warning: Detailed analysis failed, returning envelope-only: {e}")
+        result["analysis_error"] = str(e)
 
     with open(out_json, "w") as f:
         json.dump(result, f, indent=2, default=str)
@@ -865,14 +914,25 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
     """Sheet metal analysis path (original logic)."""
     thickness_mm, bend_radius_mm, bend_lines = detect_bend_faces(cyl)
 
+    # Guard against zero thickness (degenerate geometry)
+    if thickness_mm < 1e-6:
+        thickness_mm = 1.0  # fallback 1mm
+    if bend_radius_mm is not None and bend_radius_mm < 1e-6:
+        bend_radius_mm = thickness_mm  # fallback to thickness
+
     axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
     bb = envelope["bbox_mm"]
     cut_point = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
 
-    edges = cut_cross_section(solid, axis_dir, cut_point)
-    edges_info = [edge_2d_info(e, axis_dir) for e in edges]
-    chain = walk_closed_loop(edges_info, thickness_mm)
-    layout, flat_width_mm = build_flat_layout(chain, bend_radius_mm, thickness_mm, k_factor)
+    try:
+        edges = cut_cross_section(solid, axis_dir, cut_point)
+        edges_info = [edge_2d_info(e, axis_dir) for e in edges]
+        chain = walk_closed_loop(edges_info, thickness_mm)
+        layout, flat_width_mm = build_flat_layout(
+            chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
+    except Exception as e:
+        print(f"Warning: Cross-section / flat layout failed: {e}")
+        layout, flat_width_mm = [], 0.0
 
     def norm2(v):
         m = math.hypot(*v)
