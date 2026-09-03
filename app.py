@@ -424,7 +424,7 @@ function renderResults(results) {
     html += '<div class="view-grid">';
     const views = [["Isometric", r.files.view_iso], ["Top", r.files.view_top], ["Front", r.files.view_front], ["Flat Pattern", r.files.flat_pattern]];
     views.forEach(([label, url]) => {
-      if (url) html += '<div class="view-item"><img src="' + url + '" alt="' + label + '" onerror="this.parentElement.style.display=\'none\'"><div class="view-label">' + label + '</div></div>';
+      if (url) html += '<div class="view-item"><img src="' + url + '" alt="' + label + '" onerror="this.parentElement.style.display=\\'none\\'"><div class="view-label">' + label + '</div></div>';
     });
     html += '</div>';
 
@@ -504,7 +504,7 @@ async function loadHistory() {
     }
 
     count.textContent = "(" + data.jobs.length + ")";
-    let html = '<table class="history-table"><thead><tr><th>File</th><th>Dype</th><th>Date</th><th>Dimensions</th><th>Weight</th><th>Actions</th></tr></thead><tbody>';
+    let html = '<table class="history-table"><thead><tr><th>File</th><th>Type</th><th>Date</th><th>Dimensions</th><th>Weight</th><th>Actions</th></tr></thead><tbody>';
 
     data.jobs.forEach(job => {
       const ft = job.fab_type === 'machined' ? 'Machined' : 'Sheet Metal';
