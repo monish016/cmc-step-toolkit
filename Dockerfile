@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpangocairo-1.0-0 \
         libgdk-pixbuf-xlib-2.0-0 \
     libosmesa6 \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create conda environment with CadQuery (has all native deps bundled)
