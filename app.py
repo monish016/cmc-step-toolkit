@@ -840,7 +840,7 @@ def serve_file(job_id, filename):
     file_path = os.path.join(job_dir, filename)
     if not os.path.isfile(file_path):
         return "File not found", 404
-    return send_file(file_path)
+    return send_file(file_path, as_attachment=True, download_name=filename)
 
 
 if __name__ == "__main__":
