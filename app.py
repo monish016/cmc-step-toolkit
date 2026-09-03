@@ -4,7 +4,7 @@ CMC STEP Quoting Toolkit - Web Application
 Upload STEP files, get geometry extraction + quoting PDF back.
 Built for Chicago Metalcraft sheet-metal parts.
 
-v2.1 - Dual-path (sheet metal + machined), batch uploads, job history
+v2.2 - SQLite persistent history, error handling hardening
 """
 import os
 import uuid
@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import time
+import sqlite3
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_file, jsonify, url_for
 from werkzeug.utils import secure_filename
@@ -22,9 +23,72 @@ app.config["UPLOAD_FOLDER"] = "/tmp/step_uploads"
 
 ALLOWED_EXTENSIONS = {"step", "stp", "STEP", "STP"}
 
-# In-memory job history (persists within gunicorn worker lifetime)
-JOB_HISTORY = []
-MAX_HISTORY = 50
+# ---------- SQLite persistent job history ----------
+DB_DIR = os.environ.get("DATA_DIR", "/data")
+DB_PATH = os.path.join(DB_DIR, "jobs.db")
+MAX_HISTORY = 200
+
+
+def _get_db():
+    """Return a sqlite3 connection (one per call â safe for gunicorn)."""
+    os.makedirs(DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db():
+    """Create the jobs table if it doesn't exist."""
+    conn = _get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id      TEXT UNIQUE NOT NULL,
+            filename    TEXT NOT NULL,
+            timestamp   TEXT NOT NULL,
+            fab_type    TEXT,
+            dimensions  TEXT,
+            num_bends   INTEGER DEFAULT 0,
+            weight      TEXT,
+            report_url  TEXT,
+            json_url    TEXT,
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _insert_job(entry):
+    """Insert a job record into SQLite."""
+    conn = _get_db()
+    conn.execute("""
+        INSERT OR REPLACE INTO jobs
+            (job_id, filename, timestamp, fab_type, dimensions, num_bends, weight, report_url, json_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        entry["job_id"], entry["filename"], entry["timestamp"],
+        entry.get("fab_type"), entry.get("dimensions"),
+        entry.get("num_bends", 0), entry.get("weight"),
+        entry.get("report_url"), entry.get("json_url"),
+    ))
+    conn.commit()
+    conn.close()
+
+
+def _get_jobs(limit=200):
+    """Return recent jobs as list of dicts."""
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# Initialise DB at import time (runs once per gunicorn worker)
+_init_db()
+
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1] in ALLOWED_EXTENSIONS
@@ -185,7 +249,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft STEP Quoting Toolkit v2.1</div>
+<div class="footer">Chicago Metalcraft STEP Quoting Toolkit v2.2</div>
 
 <script>
 // --- Tab switching ---
@@ -440,7 +504,7 @@ async function loadHistory() {
     }
 
     count.textContent = "(" + data.jobs.length + ")";
-    let html = '<table class="history-table"><thead><tr><th>File</th><th>Type</th><th>Date</th><th>Dimensions</th><th>Weight</th><th>Actions</th></tr></thead><tbody>';
+    let html = '<table class="history-table"><thead><tr><th>File</th><th>Dype</th><th>Date</th><th>Dimensions</th><th>Weight</th><th>Actions</th></tr></thead><tbody>';
 
     data.jobs.forEach(job => {
       const ft = job.fab_type === 'machined' ? 'Machined' : 'Sheet Metal';
@@ -484,8 +548,11 @@ def analyze():
     if not file or not allowed_file(file.filename):
         return jsonify({"error": "Invalid file type. Upload a .STEP or .STP file."}), 400
 
-    density = float(request.form.get("density", 7.9))
-    k_factor = float(request.form.get("k_factor", 0.44))
+    try:
+        density = float(request.form.get("density", 7.9))
+        k_factor = float(request.form.get("k_factor", 0.44))
+    except (ValueError, TypeError):
+        density, k_factor = 7.9, 0.44
 
     # create job directory
     job_id = str(uuid.uuid4())[:12]
@@ -537,13 +604,27 @@ def analyze():
         ], check=True, capture_output=True, text=True, timeout=60)
 
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Processing failed: {e.stderr or e.stdout or str(e)}"}), 500
+        stderr = (e.stderr or "").strip()
+        if "no solid bodies" in stderr.lower() or "wireframe" in stderr.lower():
+            msg = "This STEP file contains no solid geometry (may be a wireframe or surface model)."
+        elif "assembly" in stderr.lower():
+            msg = f"Assembly detected â analyzed largest solid. Details: {stderr[-200:]}"
+        elif "degenerate" in stderr.lower() or "zero volume" in stderr.lower():
+            msg = "The geometry appears degenerate or has zero volume."
+        else:
+            msg = f"Processing failed: {stderr[-300:] or e.stdout or str(e)}"
+        return jsonify({"error": msg}), 500
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Processing timed out. The file may be too complex."}), 500
+        return jsonify({"error": "Processing timed out (>120s). The file may be too large or complex. Try a simpler part."}), 500
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)[:300]}"}), 500
 
     # read geometry JSON for response
-    with open(json_path) as f:
-        geometry = json.load(f)
+    try:
+        with open(json_path) as f:
+            geometry = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        return jsonify({"error": f"Failed to read analysis results: {e}"}), 500
 
     # build file URLs
     base = f"/files/{job_id}"
@@ -575,23 +656,29 @@ def analyze():
         "report_url": files["report_pdf"],
         "json_url": files["geometry_json"],
     }
-    JOB_HISTORY.insert(0, history_entry)
-    if len(JOB_HISTORY) > MAX_HISTORY:
-        JOB_HISTORY.pop()
+    try:
+        _insert_job(history_entry)
+    except Exception as db_err:
+        print(f"Warning: Failed to save job to DB: {db_err}")
 
     return jsonify({"geometry": geometry, "files": files, "job_id": job_id})
 
 
 @app.route("/history")
 def history():
-    """Return recent job history."""
-    # Filter out jobs whose files have been cleaned up
-    valid_jobs = []
-    for job in JOB_HISTORY:
-        job_dir = os.path.join(app.config["UPLOAD_FOLDER"], job["job_id"])
-        if os.path.isdir(job_dir):
-            valid_jobs.append(job)
-    return jsonify({"jobs": valid_jobs})
+    """Return recent job history from SQLite."""
+    try:
+        jobs = _get_jobs(MAX_HISTORY)
+        # Filter out jobs whose files have been cleaned up
+        valid_jobs = []
+        for job in jobs:
+            job_dir = os.path.join(app.config["UPLOAD_FOLDER"], job["job_id"])
+            if os.path.isdir(job_dir):
+                valid_jobs.append(job)
+        return jsonify({"jobs": valid_jobs})
+    except Exception as e:
+        print(f"Warning: Failed to read job history: {e}")
+        return jsonify({"jobs": []})
 
 
 @app.route("/files/<job_id>/<path:filename>")
