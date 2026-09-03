@@ -11,11 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
         libgdk-pixbuf-xlib-2.0-0 \
-    libosmesa6-dev \
+    libosmesa6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create conda environment with CadQuery (has all native deps bundled)
-RUN conda install -c conda-forge -c cadquery python=3.11 cadquery=2.4.0 -y && conda clean -afy
+RUN conda install -c conda-forge -c cadquery python=3.11 cadquery=2.4.0 mesalib -y && conda clean -afy
+
+# Ensure OSMesa is findable
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/conda/lib:${LD_LIBRARY_PATH}
 
 # Python dependencies
 RUN pip install --no-cache-dir \
