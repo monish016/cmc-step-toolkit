@@ -495,8 +495,69 @@ def identify_missing_info(result):
     return missing
 
 
+def _analyze_single_page(page_text, page_num):
+    """Analyze a single page's text and return extracted specs."""
+    if len(page_text.strip()) < 10:
+        return None  # skip pages with no meaningful text
+
+    result = {
+        "page": page_num,
+        "materials": find_materials(page_text),
+        "thickness": find_thickness(page_text),
+        "dimensions": find_dimensions(page_text),
+        "tolerances": find_tolerances(page_text),
+        "bends": find_bends(page_text),
+        "finishes": find_finishes(page_text),
+        "part_info": find_part_info(page_text),
+    }
+
+    result["missing_info"] = identify_missing_info(result)
+
+    # Determine fab type
+    bend_data = result["bends"]
+    has_bends = len(bend_data.get("radii", [])) > 0 or len(bend_data.get("angles", [])) > 0
+    has_thickness = len(result["thickness"]) > 0
+
+    if has_thickness or has_bends:
+        result["likely_fab_type"] = "sheet_metal"
+        result["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
+    else:
+        # Check if it has any useful drawing data at all
+        has_dims = len(result["dimensions"]) > 0
+        has_materials = len(result["materials"]) > 0
+        if has_dims or has_materials:
+            result["likely_fab_type"] = "unknown"
+            result["fab_type_confidence"] = "low"
+        else:
+            result["likely_fab_type"] = "unknown"
+            result["fab_type_confidence"] = "none"
+
+    # Build per-page summary
+    summary_parts = []
+    if result["part_info"].get("part_number"):
+        summary_parts.append(f"Part: {result['part_info']['part_number']}")
+    if result["materials"]:
+        summary_parts.append(f"Material: {result['materials'][0].get('name') or result['materials'][0]['raw_callout']}")
+    if result["thickness"]:
+        t = result["thickness"][0]
+        tk = f"{t['value_in']}\"" + (f" ({t['gauge']} GA)" if t["gauge"] else "")
+        summary_parts.append(f"Thickness: {tk}")
+    if result["dimensions"]:
+        d = result["dimensions"][0]
+        dim_str = f"{d['length']} x {d['width']}"
+        if "height" in d:
+            dim_str += f" x {d['height']}"
+        summary_parts.append(f"Size: {dim_str}")
+    if result["part_info"].get("quantity"):
+        summary_parts.append(f"Qty: {result['part_info']['quantity']}")
+
+    result["summary"] = " | ".join(summary_parts) if summary_parts else "Drawing page (limited data)"
+
+    return result
+
+
 def analyze_drawing(pdf_path):
-    """Main analysis pipeline for a PDF drawing."""
+    """Main analysis pipeline for a PDF drawing â per-page extraction."""
     if not os.path.isfile(pdf_path):
         return {"error": f"File not found: {pdf_path}"}
 
@@ -523,12 +584,23 @@ def analyze_drawing(pdf_path):
             "page_count": len(pages),
         }
 
-    # 3. Run all extractors
-    result = {
-        "source_file": os.path.basename(pdf_path),
-        "file_type": "pdf_drawing",
-        "page_count": len(pages),
-        "is_scanned": is_scanned,
+    # 3. Per-page extraction (skip page 1 if it looks like a cover/title page)
+    page_results = []
+    for pg in pages:
+        page_data = _analyze_single_page(pg["text"], pg["page"])
+        if page_data is not None:
+            # Check if page has meaningful drawing data (not just a title page)
+            has_data = (
+                len(page_data["dimensions"]) > 0 or
+                len(page_data["materials"]) > 0 or
+                len(page_data["thickness"]) > 0 or
+                page_data["part_info"].get("part_number") is not None
+            )
+            if has_data:
+                page_results.append(page_data)
+
+    # 4. Also run full-document extraction for overall summary
+    overall = {
         "materials": find_materials(full_text),
         "thickness": find_thickness(full_text),
         "dimensions": find_dimensions(full_text),
@@ -537,42 +609,43 @@ def analyze_drawing(pdf_path):
         "finishes": find_finishes(full_text),
         "part_info": find_part_info(full_text),
     }
+    overall["missing_info"] = identify_missing_info(overall)
 
-    # 4. Identify what's missing
-    result["missing_info"] = identify_missing_info(result)
-
-    # 5. Determine likely fab type
-    bend_data = result["bends"]
+    # Determine overall fab type
+    bend_data = overall["bends"]
     has_bends = len(bend_data.get("radii", [])) > 0 or len(bend_data.get("angles", [])) > 0
-    has_thickness = len(result["thickness"]) > 0
+    has_thickness = len(overall["thickness"]) > 0
 
     if has_thickness or has_bends:
-        result["likely_fab_type"] = "sheet_metal"
-        result["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
+        overall["likely_fab_type"] = "sheet_metal"
+        overall["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
     else:
-        result["likely_fab_type"] = "unknown"
-        result["fab_type_confidence"] = "low"
+        overall["likely_fab_type"] = "unknown"
+        overall["fab_type_confidence"] = "low"
 
-    # 6. Build summary
+    # Build overall summary
     summary_parts = []
-    if result["part_info"].get("part_number"):
-        summary_parts.append(f"Part: {result['part_info']['part_number']}")
-    if result["materials"]:
-        summary_parts.append(f"Material: {result['materials'][0].get('name') or result['materials'][0]['raw_callout']}")
-    if result["thickness"]:
-        t = result["thickness"][0]
+    if overall["part_info"].get("part_number"):
+        summary_parts.append(f"Part: {overall['part_info']['part_number']}")
+    if overall["materials"]:
+        mats = list({m.get("name") or m["raw_callout"] for m in overall["materials"][:3]})
+        summary_parts.append(f"Materials: {', '.join(mats)}")
+    if overall["thickness"]:
+        t = overall["thickness"][0]
         tk = f"{t['value_in']}\"" + (f" ({t['gauge']} GA)" if t["gauge"] else "")
         summary_parts.append(f"Thickness: {tk}")
-    if result["dimensions"]:
-        d = result["dimensions"][0]
-        dim_str = f"{d['length']}\" x {d['width']}\""
-        if "height" in d:
-            dim_str += f" x {d['height']}\""
-        summary_parts.append(f"Size: {dim_str}")
-    if result["part_info"].get("quantity"):
-        summary_parts.append(f"Qty: {result['part_info']['quantity']}")
+    summary_parts.append(f"{len(page_results)} drawing pages")
 
-    result["summary"] = " | ".join(summary_parts) if summary_parts else "Limited data extracted"
+    result = {
+        "source_file": os.path.basename(pdf_path),
+        "file_type": "pdf_drawing",
+        "page_count": len(pages),
+        "drawing_page_count": len(page_results),
+        "is_scanned": is_scanned,
+        "pages": page_results,
+        **overall,
+        "summary": " | ".join(summary_parts) if summary_parts else "Limited data extracted",
+    }
 
     return result
 
