@@ -4,7 +4,7 @@ CMC STEP Quoting Toolkit - Web Application
 Upload STEP files, get geometry extraction + quoting PDF back.
 Built for Chicago Metalcraft sheet-metal parts.
 
-v2.2 - SQLite persistent history, error handling hardening
+v2.3 - PDF/DWG drawing support, SQLite persistent history, error handling hardening
 """
 import os
 import uuid
@@ -21,7 +21,7 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
 app.config["UPLOAD_FOLDER"] = "/tmp/step_uploads"
 
-ALLOWED_EXTENSIONS = {"step", "stp", "STEP", "STP"}
+ALLOWED_EXTENSIONS = {"step", "stp", "STEP", "STP", "pdf", "PDF", "dwg", "DWG", "dxf", "DXF"}
 
 # ---------- SQLite persistent job history ----------
 DB_DIR = os.environ.get("DATA_DIR", "/data")
@@ -99,7 +99,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CMC STEP Quoting Toolkit</title>
+<title>CMC Quoting Toolkit</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, Helvetica, sans-serif; background: #f4f5f7; color: #1a1a1a; }
@@ -179,8 +179,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="header">
   <div>
-    <h1>CMC STEP Quoting Toolkit</h1>
-    <div class="sub">Sheet-metal geometry extraction and quoting data from STEP files</div>
+    <h1>CMC Quoting Toolkit</h1>
+    <div class="sub">Sheet-metal geometry extraction and quoting data from STEP, PDF &amp; DWG files</div>
   </div>
 </div>
 <div class="container">
@@ -194,13 +194,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <!-- Upload Tab -->
   <div class="tab-content active" id="tab-upload">
     <div class="card">
-      <h2>Upload STEP files</h2>
+      <h2>Upload files</h2>
       <form id="uploadForm" enctype="multipart/form-data">
         <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
-          <p id="dropText">Drag and drop .STEP or .STP files here, or click to browse</p>
-          <div class="hint">Max 100 MB per file. Multiple files supported.</div>
+          <p id="dropText">Drag and drop .STEP, .STP, .PDF, or .DWG files here, or click to browse</p>
+          <div class="hint">Max 100 MB per file. Multiple files supported. STEP for 3D analysis, PDF/DWG for drawing extraction.</div>
         </div>
-        <input type="file" id="fileInput" name="step_file" accept=".step,.stp,.STEP,.STP" multiple>
+        <input type="file" id="fileInput" name="step_file" accept=".step,.stp,.STEP,.STP,.pdf,.PDF,.dwg,.DWG,.dxf,.DXF" multiple>
         <div class="file-list" id="fileList"></div>
         <div class="params">
           <div class="param-group">
@@ -221,7 +221,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <input type="number" id="customDensity" name="custom_density" value="7.9" step="0.01" min="0.5" max="25">
           </div>
         </div>
-        <button type="submit" class="btn" id="submitBtn" disabled>Analyze STEP files</button>
+        <button type="submit" class="btn" id="submitBtn" disabled>Analyze files</button>
       </form>
       <div class="progress" id="progress">
         <div class="bar-wrap"><div class="bar" id="progressBar"></div></div>
@@ -249,7 +249,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft STEP Quoting Toolkit v2.2</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v2.3</div>
 
 <script>
 // --- Tab switching ---
@@ -278,7 +278,7 @@ materialSel.addEventListener("change", () => {
 dropZone.addEventListener("drop", ev => {
   const files = Array.from(ev.dataTransfer.files).filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['step','stp'].includes(ext);
+    return ['step','stp','pdf','dwg','dxf'].includes(ext);
   });
   addFiles(files);
 });
@@ -303,7 +303,7 @@ function renderFileList() {
   if (selectedFiles.length === 0) {
     list.innerHTML = "";
     submitBtn.disabled = true;
-    document.getElementById("dropText").textContent = "Drag and drop .STEP or .STP files here, or click to browse";
+    document.getElementById("dropText").textContent = "Drag and drop .STEP, .STP, .PDF, or .DWG files here, or click to browse";
     return;
   }
   submitBtn.disabled = false;
@@ -397,6 +397,12 @@ function renderResults(results) {
       return;
     }
 
+    // Check if this is a drawing extraction result vs STEP analysis
+    if (r.drawing_data) {
+      container.innerHTML += renderDrawingResult(r, idx);
+      return;
+    }
+
     const g = r.geometry;
     const env = g.envelope;
     const dims = (env.bbox_mm.xlen/25.4).toFixed(2) + '" x ' + (env.bbox_mm.ylen/25.4).toFixed(2) + '" x ' + (env.bbox_mm.zlen/25.4).toFixed(2) + '"';
@@ -484,6 +490,91 @@ function renderMachined(g, env, dims) {
   return html;
 }
 
+function renderDrawingResult(r, idx) {
+  const d = r.drawing_data;
+  const fabLabel = d.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (d.likely_fab_type === 'unknown' ? 'Unknown' : d.likely_fab_type);
+  const confColor = d.fab_type_confidence === 'high' ? '#2a5a2a' : (d.fab_type_confidence === 'medium' ? '#b8860b' : '#888');
+
+  let html = '<div class="result-section"><div class="result-header" onclick="toggleResult(' + idx + ')">' +
+    '<h3>' + r.filename + '</h3><div><span class="badge" style="background:#0066aa">Drawing</span> ' +
+    '<span class="badge" style="background:' + confColor + '">' + fabLabel + '</span></div></div>' +
+    '<div class="result-body" id="result-' + idx + '">';
+
+  // Summary
+  if (d.summary) {
+    html += '<div style="background:#e8f4ff;border:1px solid #b0d0f0;border-radius:6px;padding:0.8rem;margin-bottom:1rem;font-size:0.9rem">' + d.summary + '</div>';
+  }
+
+  // Extracted specs grid
+  html += '<div class="geo-grid">';
+  if (d.materials && d.materials.length) {
+    html += '<div class="geo-stat"><div class="value" style="font-size:1rem">' + (d.materials[0].name || d.materials[0].raw_callout) + '</div><div class="label">Material</div></div>';
+  }
+  if (d.thickness && d.thickness.length) {
+    const t = d.thickness[0];
+    html += '<div class="geo-stat"><div class="value">' + t.value_in + '"' + (t.gauge ? ' (' + t.gauge + ' GA)' : '') + '</div><div class="label">Thickness</div></div>';
+  }
+  if (d.part_info && d.part_info.part_number) {
+    html += '<div class="geo-stat"><div class="value" style="font-size:1rem">' + d.part_info.part_number + '</div><div class="label">Part Number</div></div>';
+  }
+  if (d.part_info && d.part_info.quantity) {
+    html += '<div class="geo-stat"><div class="value">' + d.part_info.quantity + '</div><div class="label">Quantity</div></div>';
+  }
+  if (d.dimensions && d.dimensions.length) {
+    const dm = d.dimensions[0];
+    let dimStr = dm.length + ' x ' + dm.width;
+    if (dm.height) dimStr += ' x ' + dm.height;
+    html += '<div class="geo-stat"><div class="value" style="font-size:1rem">' + dimStr + '</div><div class="label">Dimensions</div></div>';
+  }
+  html += '<div class="geo-stat"><div class="value">' + d.page_count + '</div><div class="label">Pages</div></div>';
+  html += '</div>';
+
+  // Detail table
+  html += '<table class="detail-table">';
+  if (d.materials && d.materials.length) {
+    html += '<tr><th>Material callout(s)</th><td>' + d.materials.map(function(m) { return m.raw_callout; }).join(', ') + '</td></tr>';
+  }
+  if (d.thickness && d.thickness.length) {
+    html += '<tr><th>Thickness</th><td>' + d.thickness.map(function(t) { return t.raw; }).join(', ') + '</td></tr>';
+  }
+  if (d.tolerances && d.tolerances.length) {
+    html += '<tr><th>Tolerances</th><td>' + d.tolerances.map(function(t) { return t.raw; }).join(', ') + '</td></tr>';
+  }
+  const bends = d.bends || {};
+  if (bends.radii && bends.radii.length) {
+    html += '<tr><th>Bend radii</th><td>' + bends.radii.map(function(b) { return b.raw; }).join(', ') + '</td></tr>';
+  }
+  if (bends.angles && bends.angles.length) {
+    html += '<tr><th>Bend angles</th><td>' + bends.angles.map(function(b) { return b.raw; }).join(', ') + '</td></tr>';
+  }
+  if (d.finishes && d.finishes.length) {
+    html += '<tr><th>Finish</th><td>' + d.finishes.map(function(f) { return f.finish; }).join(', ') + '</td></tr>';
+  }
+  if (d.part_info) {
+    if (d.part_info.revision) html += '<tr><th>Revision</th><td>' + d.part_info.revision + '</td></tr>';
+    if (d.part_info.scale) html += '<tr><th>Scale</th><td>' + d.part_info.scale + '</td></tr>';
+  }
+  html += '</table>';
+
+  // Missing info warnings
+  if (d.missing_info && d.missing_info.length) {
+    html += '<div style="margin-top:1rem"><h4 style="color:#b8860b;font-size:0.9rem;margin-bottom:0.5rem">Missing Information (' + d.missing_info.length + ')</h4>';
+    d.missing_info.forEach(function(mi) {
+      html += '<div style="background:#fff8e8;border:1px solid #e8d8a0;border-radius:4px;padding:0.5rem 0.8rem;margin-bottom:0.4rem;font-size:0.85rem">' +
+        '<strong>' + mi.field + ':</strong> ' + mi.message + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Download JSON
+  if (r.files && r.files.geometry_json) {
+    html += '<div class="dl-row"><a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download Extracted JSON</a></div>';
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
 function toggleResult(idx) {
   const body = document.getElementById("result-" + idx);
   body.classList.toggle("collapsed");
@@ -507,7 +598,7 @@ async function loadHistory() {
     let html = '<table class="history-table"><thead><tr><th>File</th><th>Type</th><th>Date</th><th>Dimensions</th><th>Weight</th><th>Actions</th></tr></thead><tbody>';
 
     data.jobs.forEach(job => {
-      const ft = job.fab_type === 'machined' ? 'Machined' : 'Sheet Metal';
+      const ft = job.fab_type === 'machined' ? 'Machined' : (job.fab_type === 'drawing' || job.fab_type === 'unknown' ? 'Drawing' : 'Sheet Metal');
       html += '<tr>' +
         '<td><strong>' + job.filename + '</strong></td>' +
         '<td>' + ft + '</td>' +
@@ -546,7 +637,11 @@ def analyze():
 
     file = request.files["step_file"]
     if not file or not allowed_file(file.filename):
-        return jsonify({"error": "Invalid file type. Upload a .STEP or .STP file."}), 400
+        return jsonify({"error": "Invalid file type. Upload a .STEP, .STP, .PDF, or .DWG file."}), 400
+
+    # Determine file type
+    file_ext = file.filename.rsplit(".", 1)[1].lower() if "." in file.filename else ""
+    is_drawing = file_ext in ("pdf", "dwg", "dxf")
 
     try:
         density = float(request.form.get("density", 7.9))
@@ -563,12 +658,70 @@ def analyze():
 
     # save uploaded file
     safe_name = secure_filename(file.filename)
-    step_path = os.path.join(job_dir, safe_name)
-    file.save(step_path)
+    file_path = os.path.join(job_dir, safe_name)
+    file.save(file_path)
     part_stem = os.path.splitext(safe_name)[0]
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     json_path = os.path.join(job_dir, "geometry_extract.json")
+
+    # ---- Drawing extraction path (PDF/DWG) ----
+    if is_drawing:
+        try:
+            subprocess.run([
+                "python3", os.path.join(script_dir, "drawing_extractor.py"),
+                file_path, "--out", json_path
+            ], check=True, capture_output=True, text=True, timeout=60)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            return jsonify({"error": f"Drawing extraction failed: {stderr[-300:] or e.stdout or str(e)}"}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Drawing extraction timed out (>60s)."}), 500
+        except Exception as e:
+            return jsonify({"error": f"Unexpected error: {str(e)[:300]}"}), 500
+
+        try:
+            with open(json_path) as f:
+                drawing_data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            return jsonify({"error": f"Failed to read extraction results: {e}"}), 500
+
+        if "error" in drawing_data:
+            return jsonify({"error": drawing_data["error"]}), 500
+
+        # Build file URLs
+        base = f"/files/{job_id}"
+        files = {"geometry_json": f"{base}/geometry_extract.json"}
+
+        # Save to history
+        dims = ""
+        if drawing_data.get("dimensions"):
+            d = drawing_data["dimensions"][0]
+            dims = f'{d["length"]}" x {d["width"]}"'
+        mat_name = ""
+        if drawing_data.get("materials"):
+            mat_name = drawing_data["materials"][0].get("name") or drawing_data["materials"][0].get("raw_callout", "")
+
+        history_entry = {
+            "job_id": job_id,
+            "filename": safe_name,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "fab_type": drawing_data.get("likely_fab_type", "drawing"),
+            "dimensions": dims,
+            "num_bends": 0,
+            "weight": mat_name or "PDF drawing",
+            "report_url": None,
+            "json_url": files["geometry_json"],
+        }
+        try:
+            _insert_job(history_entry)
+        except Exception as db_err:
+            print(f"Warning: Failed to save job to DB: {db_err}")
+
+        return jsonify({"drawing_data": drawing_data, "files": files, "job_id": job_id})
+
+    # ---- STEP analysis path ----
+    step_path = file_path
     flat_path = os.path.join(job_dir, "flat_pattern.png")
     report_path = os.path.join(job_dir, f"{part_stem}_report.pdf")
 
