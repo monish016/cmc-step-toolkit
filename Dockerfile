@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
         libgdk-pixbuf-xlib-2.0-0 \
+    libosmesa6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create conda environment with CadQuery (has all native deps bundled)
@@ -30,10 +31,10 @@ WORKDIR /app
 
 # Copy application files
 COPY step_quote_extract.py .
-COPY drawing_extractor.py .
 COPY generate_views.py .
 COPY render_flat_pattern.py .
 COPY generate_report.py .
+COPY drawing_extractor.py .
 COPY app.py .
 COPY INSTRUCTIONS.md .
 
