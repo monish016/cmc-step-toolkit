@@ -1,12 +1,12 @@
 """
 step_quote_extract.py
 ======================
-Reusable pipeline: extract quoting-grade data (envelope, weight, bend table,
-flat-pattern width, hole/slot/feature table) directly from a sheet-metal
-STEP file's B-rep solid -- no drawing/PDF required.
+Reusable pipeline: extract quoting-grade data from a STEP file's B-rep solid.
+Supports BOTH sheet-metal and machined parts (auto-classified).
 
-See INSTRUCTIONS.md in this folder for the full procedure and what to
-sanity-check on each new part.
+Sheet metal: envelope, weight, bend table, flat-pattern width, hole/slot/feature table.
+Machined: envelope, weight, stock size, turning/milling classification,
+          pocket/slot/hole/face feature table.
 
 Usage:
     python3 step_quote_extract.py <path_to_step_file> [--density 7.9] [--k 0.44]
@@ -20,7 +20,9 @@ from collections import defaultdict
 import cadquery as cq
 from cadquery import importers
 from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
-from OCP.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Line, GeomAbs_Circle
+from OCP.GeomAbs import (GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone,
+                          GeomAbs_Sphere, GeomAbs_Torus, GeomAbs_BSplineSurface,
+                          GeomAbs_Line, GeomAbs_Circle)
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
 from OCP.gp import gp_Pln, gp_Pnt, gp_Dir
 from OCP.TopExp import TopExp_Explorer
@@ -43,22 +45,32 @@ def get_envelope(solid, density_g_cm3=7.9):
     vol_cm3 = vol_mm3 / 1000.0
     mass_g = vol_cm3 * density_g_cm3
     mass_lb = mass_g / 453.592
+    area_mm2 = 0
+    try:
+        # Sum all face areas for total surface area
+        faces = cq.Workplane().add(solid).faces().vals()
+        area_mm2 = sum(f.Area() for f in faces)
+    except Exception:
+        pass
     return {
         "bbox_mm": {"xlen": bb.xlen, "ylen": bb.ylen, "zlen": bb.zlen,
                      "xmin": bb.xmin, "xmax": bb.xmax,
                      "ymin": bb.ymin, "ymax": bb.ymax,
                      "zmin": bb.zmin, "zmax": bb.zmax},
+        "volume_mm3": vol_mm3,
         "volume_cm3": vol_cm3,
+        "area_mm2": area_mm2,
+        "mass_g": mass_g,
         "mass_lb": mass_lb,
         "mass_kg": mass_g / 1000.0,
     }
 
 
 # --------------------------------------------------------------------------
-# 2. FACE CLASSIFICATION + AUTO BEND-FACE DETECTION
+# 2. FACE CLASSIFICATION
 # --------------------------------------------------------------------------
 def classify_faces(shape):
-    """Return lists of (idx, face, extra-data) for planar and cylindrical faces."""
+    """Return lists of (idx, face, extra-data) for planar, cylindrical, and other faces."""
     faces = shape.faces().vals()
     planar, cyl, other = [], [], []
     for i, f in enumerate(faces):
@@ -93,19 +105,417 @@ def cyl_face_info(f, surf):
     }
 
 
+# ==========================================================================
+# FAB TYPE CLASSIFIER
+# ==========================================================================
+def classify_fab_type(shape, solid, envelope, planar, cyl, other):
+    """
+    Auto-classify the part as 'sheet_metal' or 'machined'.
+
+    Heuristics:
+    - Sheet metal: uniform thin wall, high surface-area-to-volume ratio,
+      cylindrical bend faces with large v_len, few face types.
+    - Machined: blocky, pockets, varied face normals, no bend signatures,
+      or turning geometry (mostly cylindrical faces sharing an axis).
+
+    Returns: (fab_type, confidence, sub_type, reasoning)
+      fab_type: 'sheet_metal' or 'machined'
+      sub_type: None for sheet_metal; 'milling', 'turning', or 'mill_turn' for machined
+    """
+    bb = envelope["bbox_mm"]
+    dims = sorted([bb["xlen"], bb["ylen"], bb["zlen"]])
+    vol_mm3 = envelope["volume_mm3"]
+    bbox_vol = bb["xlen"] * bb["ylen"] * bb["zlen"]
+    fill_ratio = vol_mm3 / bbox_vol if bbox_vol > 0 else 0
+
+    total_faces = len(planar) + len(cyl) + len(other)
+    planar_ratio = len(planar) / total_faces if total_faces else 0
+    cyl_ratio = len(cyl) / total_faces if total_faces else 0
+
+    # Aspect ratio: thinnest dimension vs average of other two
+    aspect_ratio = dims[0] / ((dims[1] + dims[2]) / 2) if (dims[1] + dims[2]) > 0 else 1
+
+    # Check for bend faces (sheet metal signature)
+    cyl_infos = [(i, cyl_face_info(f, s)) for i, f, s in cyl]
+    vlens = sorted(info["v_len"] for _, info in cyl_infos) if cyl_infos else []
+    n = len(vlens)
+    small_half = vlens[:max(1, n // 2)] if vlens else [1.0]
+    thickness_est = sorted(small_half)[len(small_half) // 2]
+
+    bend_candidates = [(i, info) for i, info in cyl_infos
+                       if info["v_len"] > 8 * thickness_est]
+    has_bends = len(bend_candidates) >= 1
+
+    # Sheet metal score
+    sm_score = 0
+    reasons = []
+
+    # Thin aspect ratio (thinnest dim < 15% of average of other two)
+    if aspect_ratio < 0.15:
+        sm_score += 3
+        reasons.append(f"thin_aspect={aspect_ratio:.3f}")
+    elif aspect_ratio < 0.25:
+        sm_score += 2
+        reasons.append(f"moderate_aspect={aspect_ratio:.3f}")
+
+    # Low fill ratio (sheet metal wraps around, doesn't fill bbox)
+    if fill_ratio < 0.15:
+        sm_score += 2
+        reasons.append(f"low_fill={fill_ratio:.3f}")
+    elif fill_ratio < 0.30:
+        sm_score += 1
+        reasons.append(f"moderate_fill={fill_ratio:.3f}")
+
+    # Bend faces detected
+    if has_bends:
+        sm_score += 3
+        reasons.append(f"bend_faces={len(bend_candidates)}")
+
+    # High surface-area-to-volume ratio (thin parts have high SA/V)
+    sa_v = envelope["area_mm2"] / vol_mm3 if vol_mm3 > 0 else 0
+    if sa_v > 0.5:
+        sm_score += 1
+        reasons.append(f"high_sa_v={sa_v:.3f}")
+
+    # Machined indicators
+    mach_score = 0
+
+    # High fill ratio = blocky stock
+    if fill_ratio > 0.40:
+        mach_score += 2
+        reasons.append(f"high_fill={fill_ratio:.3f}")
+
+    # Thick aspect ratio
+    if aspect_ratio > 0.3:
+        mach_score += 2
+        reasons.append(f"thick_aspect={aspect_ratio:.3f}")
+
+    # No bends
+    if not has_bends:
+        mach_score += 1
+        reasons.append("no_bends")
+
+    # Many non-planar/non-cylindrical faces (cones, tori, splines = machined complexity)
+    if len(other) > 3:
+        mach_score += 1
+        reasons.append(f"complex_faces={len(other)}")
+
+    # Decision
+    if sm_score >= 5 and sm_score > mach_score:
+        fab_type = "sheet_metal"
+        confidence = "high" if sm_score >= 7 else "medium"
+        sub_type = None
+    elif mach_score >= 3 and mach_score >= sm_score:
+        fab_type = "machined"
+        confidence = "high" if mach_score >= 5 else "medium"
+        # Sub-classify: turning vs milling
+        sub_type = classify_machining_type(cyl_infos, planar, total_faces, dims)
+    else:
+        # Ambiguous â default to sheet metal if we have bends, else machined
+        if has_bends:
+            fab_type = "sheet_metal"
+            sub_type = None
+        else:
+            fab_type = "machined"
+            sub_type = classify_machining_type(cyl_infos, planar, total_faces, dims)
+        confidence = "low"
+
+    return fab_type, confidence, sub_type, reasons
+
+
+def classify_machining_type(cyl_infos, planar, total_faces, dims_sorted):
+    """
+    Sub-classify machined parts as 'turning', 'milling', or 'mill_turn'.
+
+    Turning: mostly cylindrical faces sharing a common axis, roughly axisymmetric.
+    Milling: mostly planar faces at varied heights, pockets, steps.
+    Mill-turn: significant features of both.
+    """
+    if not cyl_infos:
+        return "milling"
+
+    # Check if cylindrical faces share a common axis
+    def axis_key(a):
+        # Normalize direction (prefer positive dominant component)
+        ax = list(a)
+        dominant = max(range(3), key=lambda i: abs(ax[i]))
+        if ax[dominant] < 0:
+            ax = [-c for c in ax]
+        return tuple(round(c, 1) for c in ax)
+
+    axis_counts = defaultdict(int)
+    axis_area = defaultdict(float)
+    total_cyl_area = 0
+    for _, info in cyl_infos:
+        key = axis_key(info["axis"])
+        axis_counts[key] += 1
+        axis_area[key] += info["area"]
+        total_cyl_area += info["area"]
+
+    if not axis_counts:
+        return "milling"
+
+    # Dominant axis = the one with the most cylindrical surface area
+    dominant_axis = max(axis_area, key=axis_area.get)
+    dominant_area_ratio = axis_area[dominant_axis] / total_cyl_area if total_cyl_area > 0 else 0
+    dominant_count_ratio = axis_counts[dominant_axis] / len(cyl_infos) if cyl_infos else 0
+
+    cyl_face_ratio = len(cyl_infos) / total_faces if total_faces > 0 else 0
+
+    # Full-revolution faces (360 deg sweep) on the dominant axis = strong turning indicator
+    full_rev_count = sum(1 for _, info in cyl_infos
+                         if axis_key(info["axis"]) == dominant_axis
+                         and info["u_sweep_deg"] > 350)
+
+    # Turning: >60% of cyl area on one axis, many full-revolution faces
+    # Also check aspect ratio â turning parts tend to be long in one dimension
+    turning_score = 0
+    if dominant_area_ratio > 0.7:
+        turning_score += 2
+    if full_rev_count >= 3:
+        turning_score += 2
+    if cyl_face_ratio > 0.4:
+        turning_score += 1
+
+    # Milling indicators: many planar faces, low cyl ratio
+    milling_score = 0
+    planar_ratio = len(planar) / total_faces if total_faces > 0 else 0
+    if planar_ratio > 0.5:
+        milling_score += 2
+    if cyl_face_ratio < 0.25:
+        milling_score += 1
+    if full_rev_count < 2:
+        milling_score += 1
+
+    if turning_score >= 4 and turning_score > milling_score:
+        return "turning"
+    elif milling_score >= 3 and milling_score > turning_score:
+        return "milling"
+    elif turning_score >= 2 and milling_score >= 2:
+        return "mill_turn"
+    else:
+        return "milling"
+
+
+# ==========================================================================
+# MACHINED PARTS ANALYSIS
+# ==========================================================================
+def compute_stock_size(envelope, machining_type):
+    """
+    Compute recommended raw stock dimensions with machining allowance.
+    Returns stock size in mm and inches.
+    """
+    bb = envelope["bbox_mm"]
+    dims = [bb["xlen"], bb["ylen"], bb["zlen"]]
+
+    if machining_type == "turning":
+        # For turning: stock is a round bar or tube
+        # Diameter = max of the two shorter dims + allowance
+        # Length = longest dim + allowance
+        sorted_dims = sorted(dims)
+        diameter = max(sorted_dims[0], sorted_dims[1]) + 4.0  # 2mm allowance per side
+        length = sorted_dims[2] + 6.0  # 3mm allowance per end
+        return {
+            "type": "round_bar",
+            "diameter_mm": round(diameter, 1),
+            "diameter_in": round(diameter / 25.4, 3),
+            "length_mm": round(length, 1),
+            "length_in": round(length / 25.4, 3),
+            "allowance_mm": 4.0,
+            "description": f"{diameter:.0f}mm dia x {length:.0f}mm round bar"
+        }
+    else:
+        # For milling: stock is a rectangular block
+        # Add 2-3mm per side allowance
+        allowance = 4.0  # 2mm per side
+        stock = [round(d + allowance, 1) for d in dims]
+        return {
+            "type": "rectangular_block",
+            "x_mm": stock[0], "y_mm": stock[1], "z_mm": stock[2],
+            "x_in": round(stock[0] / 25.4, 3),
+            "y_in": round(stock[1] / 25.4, 3),
+            "z_in": round(stock[2] / 25.4, 3),
+            "allowance_mm": allowance,
+            "description": f"{stock[0]:.0f} x {stock[1]:.0f} x {stock[2]:.0f} mm block"
+        }
+
+
+def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
+    """
+    Analyze features on a machined part: pockets, holes, slots, faces, curved features.
+    Returns a structured feature list.
+    """
+    bb = envelope["bbox_mm"]
+    features = []
+    total_area = envelope["area_mm2"]
+
+    # --- Holes: cylindrical faces with full or near-full revolution ---
+    hole_groups = defaultdict(list)
+    for i, f, surf in cyl:
+        info = cyl_face_info(f, surf)
+        if info["u_sweep_deg"] > 350:  # Full revolution = hole or shaft
+            # Group by radius (within tolerance)
+            r_key = round(info["radius"], 1)
+            hole_groups[r_key].append(info)
+
+    for r_key, holes in hole_groups.items():
+        for h in holes:
+            dia_mm = h["radius"] * 2
+            depth_mm = h["v_len"]
+            features.append({
+                "type": "hole",
+                "diameter_mm": round(dia_mm, 2),
+                "diameter_in": round(dia_mm / 25.4, 3),
+                "depth_mm": round(depth_mm, 2),
+                "depth_in": round(depth_mm / 25.4, 3),
+                "center": h["center"],
+                "confidence": "high"
+            })
+
+    # --- Pockets / steps: planar faces at different Z-levels (normals parallel to a primary axis) ---
+    # Group planar faces by their normal direction
+    normal_groups = defaultdict(list)
+    for i, f, surf in planar:
+        pln = surf.Plane()
+        n = pln.Axis().Direction()
+        n_key = (round(abs(n.X()), 1), round(abs(n.Y()), 1), round(abs(n.Z()), 1))
+        loc = pln.Location()
+        area = f.Area()
+        ctr = f.Center()
+        normal_groups[n_key].append({
+            "idx": i,
+            "normal": (n.X(), n.Y(), n.Z()),
+            "location": (loc.X(), loc.Y(), loc.Z()),
+            "area": area,
+            "center": (ctr.x, ctr.y, ctr.z),
+        })
+
+    # For each normal direction, find faces at different depths = potential pockets/steps
+    pocket_candidates = []
+    for n_key, face_group in normal_groups.items():
+        if len(face_group) < 2:
+            continue
+        # Determine the projection axis (dominant component of normal)
+        sample_n = face_group[0]["normal"]
+        proj_axis = max(range(3), key=lambda i: abs(sample_n[i]))
+
+        # Group by depth along the projection axis
+        depth_groups = defaultdict(list)
+        for fg in face_group:
+            depth = round(fg["center"][proj_axis], 1)
+            depth_groups[depth].append(fg)
+
+        # The outermost depth (highest absolute value along axis) = top face
+        # Inner depths = pocket floors
+        if len(depth_groups) > 1:
+            depths = sorted(depth_groups.keys())
+            # Consider non-largest faces at inner depths as pockets
+            outer_depth = depths[-1] if sample_n[proj_axis] > 0 else depths[0]
+            for d in depths:
+                if d == outer_depth:
+                    continue
+                for fg in depth_groups[d]:
+                    pocket_depth = abs(outer_depth - d)
+                    if pocket_depth > 0.5 and fg["area"] > 10:  # Meaningful pocket
+                        pocket_candidates.append({
+                            "type": "pocket",
+                            "depth_mm": round(pocket_depth, 2),
+                            "depth_in": round(pocket_depth / 25.4, 3),
+                            "area_mm2": round(fg["area"], 1),
+                            "center": fg["center"],
+                            "confidence": "medium"
+                        })
+
+    # Deduplicate pockets by proximity
+    used = set()
+    for i, p in enumerate(pocket_candidates):
+        if i in used:
+            continue
+        for j in range(i + 1, len(pocket_candidates)):
+            if j in used:
+                continue
+            if math.dist(p["center"], pocket_candidates[j]["center"]) < 5.0:
+                # Merge: keep larger
+                if pocket_candidates[j]["area_mm2"] > p["area_mm2"]:
+                    p.update(pocket_candidates[j])
+                used.add(j)
+        features.append(p)
+
+    # --- Slots: partial cylindrical faces (arcs < 360) that aren't bend faces ---
+    for i, f, surf in cyl:
+        info = cyl_face_info(f, surf)
+        if 10 < info["u_sweep_deg"] < 350:
+            # Partial cylinder â could be a slot end or fillet
+            if info["radius"] < 20 and info["v_len"] > 1.0:
+                features.append({
+                    "type": "slot_or_fillet",
+                    "radius_mm": round(info["radius"], 2),
+                    "radius_in": round(info["radius"] / 25.4, 3),
+                    "sweep_deg": round(info["u_sweep_deg"], 1),
+                    "length_mm": round(info["v_len"], 2),
+                    "center": info["center"],
+                    "confidence": "low"
+                })
+
+    # --- Curved/complex features from 'other' faces ---
+    for i, f, surf in other:
+        st = surf.GetType()
+        area = f.Area()
+        ctr = f.Center()
+        type_name = {
+            GeomAbs_Cone: "cone",
+            GeomAbs_Sphere: "sphere",
+            GeomAbs_Torus: "torus",
+            GeomAbs_BSplineSurface: "freeform_surface",
+        }.get(st, "complex_surface")
+        if area > 5:  # Skip tiny edge blends
+            features.append({
+                "type": type_name,
+                "area_mm2": round(area, 1),
+                "center": (ctr.x, ctr.y, ctr.z),
+                "confidence": "medium"
+            })
+
+    return features
+
+
+def summarize_machined_features(features):
+    """Produce counts and summary stats for the feature list."""
+    counts = defaultdict(int)
+    for f in features:
+        counts[f["type"]] += 1
+
+    holes = [f for f in features if f["type"] == "hole"]
+    pockets = [f for f in features if f["type"] == "pocket"]
+
+    summary = {
+        "total_features": len(features),
+        "feature_counts": dict(counts),
+        "num_holes": len(holes),
+        "num_pockets": len(pockets),
+    }
+
+    if holes:
+        diameters = [h["diameter_mm"] for h in holes]
+        summary["hole_diameters_mm"] = sorted(set(round(d, 1) for d in diameters))
+        summary["hole_diameter_range_in"] = f'{min(diameters)/25.4:.3f}" - {max(diameters)/25.4:.3f}"'
+
+    if pockets:
+        depths = [p["depth_mm"] for p in pockets]
+        summary["pocket_depth_range_mm"] = f"{min(depths):.1f} - {max(depths):.1f}"
+
+    return summary
+
+
+# ==========================================================================
+# SHEET METAL ANALYSIS (existing logic, preserved)
+# ==========================================================================
 def detect_bend_faces(cyl, thickness_hint=None):
     """
     Auto-detect the sheet-metal bend cylindrical faces.
-    Heuristic: bend faces have a V-length (extent along the fold axis) that is
-    MUCH larger than the sheet thickness, whereas hole/slot/fillet cylindrical
-    faces have V-length approx equal to the material thickness.
-    Returns: thickness_mm, bend_radius_mm, list of bend-face clusters
-             (each with axis, angle_deg, v_range, faces).
     """
     infos = [(i, cyl_face_info(f, s)) for i, f, s in cyl]
     vlens = sorted(info["v_len"] for _, info in infos)
-    # thickness estimate = median of the smaller half of v_len values
-    # (most cylindrical faces on a sheet-metal part are hole/slot walls)
     n = len(vlens)
     small_half = vlens[: max(1, n // 2)]
     thickness_est = sorted(small_half)[len(small_half) // 2] if small_half else 1.0
@@ -114,7 +524,6 @@ def detect_bend_faces(cyl, thickness_hint=None):
 
     bend_candidates = [(i, info) for i, info in infos if info["v_len"] > 8 * thickness_est]
 
-    # cluster bend candidates by (axis direction rounded, location proximity)
     def axis_key(a):
         return tuple(round(c, 2) for c in a)
 
@@ -130,7 +539,7 @@ def detect_bend_faces(cyl, thickness_hint=None):
                 continue
             same_axis = axis_key(info["axis"]) == axis_key(info2["axis"]) or \
                         axis_key(tuple(-c for c in info["axis"])) == axis_key(info2["axis"])
-            close = math.dist(info["loc"][1:], info2["loc"][1:]) < 2.0  # compare off-axis coords
+            close = math.dist(info["loc"][1:], info2["loc"][1:]) < 2.0
             if same_axis and close:
                 group.append((j, info2))
                 used.add(j)
@@ -141,7 +550,6 @@ def detect_bend_faces(cyl, thickness_hint=None):
         radii = [info["radius"] for _, info in group]
         r_in, r_out = min(radii), max(radii)
         angle = max(info["u_sweep_deg"] for _, info in group)
-        # axis direction (use first face's axis, normalized sign convention: prefer +component)
         axis = group[0][1]["axis"]
         bend_lines.append({
             "inner_radius": r_in,
@@ -159,10 +567,10 @@ def detect_bend_faces(cyl, thickness_hint=None):
 
 
 # --------------------------------------------------------------------------
-# 3. CROSS-SECTION CUT + WIRE WALK  ->  ordered flat/bend segment sequence
+--------------------------
+# CROSS-SECTION + WIRE WALK -> flat/bend segment sequence (sheet metal)
 # --------------------------------------------------------------------------
 def dominant_bend_axis(bend_lines):
-    """Pick the most common axis direction among detected bend faces (rounded to a unit vector)."""
     counts = defaultdict(int)
     reps = {}
     for b in bend_lines:
@@ -174,7 +582,6 @@ def dominant_bend_axis(bend_lines):
 
 
 def cut_cross_section(solid, axis_dir, cut_point):
-    """Cut the solid with a plane perpendicular to axis_dir at cut_point (3-tuple)."""
     pln = gp_Pln(gp_Pnt(*cut_point), gp_Dir(*axis_dir))
     sec = BRepAlgoAPI_Section(solid.wrapped, pln)
     sec.Build()
@@ -188,20 +595,12 @@ def cut_cross_section(solid, axis_dir, cut_point):
 
 
 def edge_2d_info(edge, axis_dir):
-    """
-    Project edge endpoints/geometry onto the 2D plane perpendicular to axis_dir.
-    Returns dict with type ('line'/'arc'), endpoints (2D), length, and (for arcs)
-    radius + sweep angle. The 2D basis is chosen automatically (any two axes
-    perpendicular to axis_dir).
-    """
     curve = BRepAdaptor_Curve(edge)
     t = curve.GetType()
     p0 = curve.Value(curve.FirstParameter())
     p1 = curve.Value(curve.LastParameter())
 
-    # build a 2D basis perpendicular to axis_dir
     ax = axis_dir
-    # pick a helper vector not parallel to ax
     helper = (1, 0, 0) if abs(ax[0]) < 0.9 else (0, 1, 0)
     def cross(a, b):
         return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
@@ -233,30 +632,20 @@ def edge_2d_info(edge, axis_dir):
 
 
 def walk_closed_loop(edges_info, thickness_mm, tol=0.5):
-    """
-    Given all section-edge 2D infos (forming one closed loop = outer path + end
-    cap + inner path (reversed) + other end cap), split at the two 'cap' edges
-    (short line segments whose length is approximately the sheet thickness) and
-    return ONE ordered chain (list of segments in sequence: flat/bend/flat/...).
-    """
     def pt_key(p):
         return (round(p[0], 2), round(p[1], 2))
 
-    # build adjacency graph over endpoints
-    adj = defaultdict(list)  # point_key -> list of (edge_index, other_endpoint_key)
+    adj = defaultdict(list)
     for idx, info in enumerate(edges_info):
         a, b = pt_key(info["p0"]), pt_key(info["p1"])
         adj[a].append((idx, b))
         adj[b].append((idx, a))
 
-    # identify cap edges: line type, length close to thickness
     cap_idxs = [i for i, info in enumerate(edges_info)
                 if info["type"] == "line" and abs(info["length"] - thickness_mm) < max(0.3, 0.25 * thickness_mm)]
 
-    # walk the loop starting after a cap edge, stop at the next cap edge
     visited_edges = set()
     if not cap_idxs:
-        # fallback: no caps found (closed tube profile) -- walk the whole loop once
         start_idx = 0
         chain = []
         cur_edge = start_idx
@@ -291,7 +680,7 @@ def walk_closed_loop(edges_info, thickness_mm, tol=0.5):
         if chosen is None:
             break
         visited_edges.add(chosen)
-        if chosen in cap_idxs:  # reached the other end cap -- stop (don't include the cap itself)
+        if chosen in cap_idxs:
             break
         info = edges_info[chosen]
         chain.append(info)
@@ -300,13 +689,6 @@ def walk_closed_loop(edges_info, thickness_mm, tol=0.5):
 
 
 def build_flat_layout(chain, bend_radius_mm, thickness_mm, k_factor=0.44):
-    """
-    Convert the ordered chain of line/arc segments into a cumulative
-    developed-length layout: [(kind, start_offset, end_offset, extra), ...]
-    kind is 'flat' or 'bend' (with angle_deg for bends).
-    Also returns the raw (p0,p1) 2D endpoints for each flat segment so hole
-    positions can later be projected onto them.
-    """
     layout = []
     cum = 0.0
     for seg in chain:
@@ -324,12 +706,10 @@ def build_flat_layout(chain, bend_radius_mm, thickness_mm, k_factor=0.44):
     return layout, cum
 
 
-
 # --------------------------------------------------------------------------
-# 4. FEATURE (HOLE/SLOT/TAB) AUTO-CLUSTERING
+# SHEET METAL FEATURE DETECTION
 # --------------------------------------------------------------------------
 def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
-    """Collect small planar + small-radius cylindrical faces = hole/slot/tab candidates."""
     faces = shape.faces().vals()
     candidates = []
     for i, f in enumerate(faces):
@@ -357,24 +737,20 @@ def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
 def cluster_features(candidates, thresh=7.0):
     n = len(candidates)
     parent = list(range(n))
-
     def find(a):
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
         return a
-
     def union(a, b):
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[ra] = rb
-
     for i in range(n):
         for j in range(i + 1, n):
             d = math.dist(candidates[i]["center"], candidates[j]["center"])
             if d < thresh:
                 union(i, j)
-
     groups = defaultdict(list)
     for i in range(n):
         groups[find(i)].append(candidates[i])
@@ -382,11 +758,6 @@ def cluster_features(candidates, thresh=7.0):
 
 
 def merge_slot_pairs(clusters):
-    """
-    Two matching-radius cylindrical clusters (no planar faces) that are
-    collinear and reasonably close together are the two rounded ends of one
-    slot. Detect and merge those pairs; return (slot_features, remaining_clusters).
-    """
     cyl_only = []
     remaining = []
     for m in clusters:
@@ -400,7 +771,6 @@ def merge_slot_pairs(clusters):
             cyl_only.append({"r": r, "center": (cx, cy, cz), "used": False, "orig": m})
         else:
             remaining.append(m)
-
     slots = []
     for i in range(len(cyl_only)):
         if cyl_only[i]["used"]:
@@ -425,16 +795,11 @@ def merge_slot_pairs(clusters):
                         "confidence": "high",
                     })
                     break
-
     leftover_clusters = remaining + [c["orig"] for c in cyl_only if not c["used"]]
     return slots, leftover_clusters
 
 
 def classify_cluster(members):
-    """Heuristic shape classification for a cluster of feature faces.
-    Returns None for clusters too small/degenerate to be a real hole/slot
-    (e.g. a single stray wall face, or a tiny edge-break fillet) -- these are
-    reported separately as 'unclassified' so a human can eyeball them."""
     n_planar = sum(1 for m in members if m["kind"] == "planar")
     cyls = [m for m in members if m["kind"] == "cyl"]
     xs = [m["center"][0] for m in members]
@@ -442,41 +807,66 @@ def classify_cluster(members):
     zs = [m["center"][2] for m in members]
     cx, cy, cz = sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs)
     spread = (max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs))
-
     if cyls:
         radii = [c["radius"] for c in cyls]
         r_avg = sum(radii) / len(radii)
-        if r_avg * 2 / 25.4 < 0.08:  # < ~2mm dia -- almost certainly an edge/fillet break, not a hole
+        if r_avg * 2 / 25.4 < 0.08:
             return None
         dia_in = 2 * r_avg / 25.4
-        # NOTE: STEP solids almost never preserve thread helix geometry -- a
-        # tapped hole and a plain clearance hole of the same diameter are
-        # indistinguishable from B-rep alone. We deliberately do NOT guess
-        # "tapped" here; every round hole is reported as "round" and flagged
-        # in the instructions to cross-check thread callouts with the customer.
         return {"type": "round",
                 "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
     else:
         xl, yl = spread[0], spread[1]
-        if xl < 2.0 or yl < 2.0:  # < ~0.08in -- single stray wall face, not a real square hole
+        if xl < 2.0 or yl < 2.0:
             return None
         return {"type": "square_or_rect", "size_in": (round(xl/25.4,3), round(yl/25.4,3)),
                 "center": (cx, cy, cz), "confidence": "high"}
 
 
-# --------------------------------------------------------------------------
-# 5. MAIN DRIVER
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 5. MAIN DRIVER â unified entry point
+# ==========================================================================
 def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json"):
     shape, solid = load_step(step_path)
     envelope = get_envelope(solid, density)
 
-    faces, planar, cyl, other = classify_faces(shape)
+    faces_list, planar, cyl, other = classify_faces(shape)
+
+    # --- Auto-classify fab type ---
+    fab_type, confidence, sub_type, reasons = classify_fab_type(
+        shape, solid, envelope, planar, cyl, other)
+
+    result = {
+        "source_file": step_path,
+        "fab_type": fab_type,
+        "fab_type_confidence": confidence,
+        "fab_sub_type": sub_type,
+        "classification_reasons": reasons,
+        "envelope": envelope,
+        "face_counts": {
+            "planar": len(planar),
+            "cylindrical": len(cyl),
+            "other": len(other),
+            "total": len(planar) + len(cyl) + len(other),
+        },
+    }
+
+    if fab_type == "sheet_metal":
+        result.update(run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor))
+    else:
+        result.update(run_machined(shape, solid, envelope, faces_list, planar, cyl, other, sub_type))
+
+    with open(out_json, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    return result
+
+
+def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
+    """Sheet metal analysis path (original logic)."""
     thickness_mm, bend_radius_mm, bend_lines = detect_bend_faces(cyl)
 
     axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
     bb = envelope["bbox_mm"]
-    # cut point: center of bounding box along the bend axis's dominant coordinate
     cut_point = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
 
     edges = cut_cross_section(solid, axis_dir, cut_point)
@@ -516,10 +906,6 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
                     best = (cand, perp)
         return best[0] if best else None
 
-    xmin = bb["xmin"]
-
-    # reference "length=0" point: whichever bbox corner gives the minimum
-    # projection onto the bend axis (handles any axis sign/orientation)
     corners = [(bb["xmin"] if i&1 else bb["xmax"],
                 bb["ymin"] if i&2 else bb["ymax"],
                 bb["zmin"] if i&4 else bb["zmax"]) for i in range(8)]
@@ -539,7 +925,6 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
     features = slot_features + [c for c in classified if c is not None]
     unclassified_count = sum(1 for c in classified if c is None)
 
-    # attach (length_in, transverse_in) position to every feature
     for feat in features:
         cx, cy, cz = feat["center"]
         length_along_axis = project_point_to_axis((cx, cy, cz))
@@ -548,9 +933,7 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
         t_mm = transverse_pos_mm(yz)
         feat["transverse_in"] = round(t_mm/25.4, 3) if t_mm is not None else None
 
-    result = {
-        "source_file": step_path,
-        "envelope": envelope,
+    return {
         "thickness_in": round(thickness_mm/25.4, 4),
         "bend_radius_in": round(bend_radius_mm/25.4, 4) if bend_radius_mm else None,
         "num_bends": len(bend_lines),
@@ -565,10 +948,46 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
         "features_raw_count": len(features),
         "features_unclassified_count": unclassified_count,
         "features": features,
+        "processes": ["blanking", "bending"] + (
+            ["tapping (check manually)"] if any(f["type"] == "round" and f["diameter_in"] < 0.5 for f in features) else []
+        ),
     }
-    with open(out_json, "w") as f:
-        json.dump(result, f, indent=2, default=str)
-    return result
+
+
+def run_machined(shape, solid, envelope, faces_list, planar, cyl, other, machining_type):
+    """Machined part analysis path."""
+    stock = compute_stock_size(envelope, machining_type)
+    features = analyze_machined_features(shape, faces_list, planar, cyl, other, envelope)
+    summary = summarize_machined_features(features)
+
+    bb = envelope["bbox_mm"]
+    bbox_vol = bb["xlen"] * bb["ylen"] * bb["zlen"]
+    material_removal = 1 - (envelope["volume_mm3"] / bbox_vol) if bbox_vol > 0 else 0
+
+    processes = []
+    if machining_type == "turning":
+        processes.append("turning")
+    if machining_type == "milling":
+        processes.append("milling")
+    if machining_type == "mill_turn":
+        processes.extend(["turning", "milling"])
+
+    # Infer additional processes
+    if summary["num_holes"] > 0:
+        processes.append("drilling")
+    has_small_holes = any(f["type"] == "hole" and f["diameter_mm"] < 12 for f in features)
+    if has_small_holes:
+        processes.append("tapping (check manually)")
+
+    return {
+        "machining_type": machining_type,
+        "stock_size": stock,
+        "material_removal_ratio": round(material_removal, 3),
+        "feature_summary": summary,
+        "features": features,
+        "features_raw_count": len(features),
+        "processes": processes,
+    }
 
 
 if __name__ == "__main__":
