@@ -4,7 +4,7 @@ CMC STEP Quoting Toolkit - Web Application
 Upload STEP files, get geometry extraction + quoting PDF back.
 Built for Chicago Metalcraft sheet-metal parts.
 
-v2.3 - PDF/DWG drawing support, SQLite persistent history, error handling hardening
+v3.0 - Gauge detection, hardware callouts, complexity scoring, countersink/chamfer detection, feature detail table, improved UX
 """
 import os
 import uuid
@@ -30,7 +30,7 @@ MAX_HISTORY = 200
 
 
 def _get_db():
-    """Return a sqlite3 connection (one per call â safe for gunicorn)."""
+    """Return a sqlite3 connection (one per call — safe for gunicorn)."""
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
@@ -128,8 +128,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .btn-outline:hover { background: #1a3a1a; color: #fff; }
   .progress { display: none; margin-top: 1rem; }
   .progress .bar-wrap { background: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden; }
-  .progress .bar { background: #1a3a1a; height: 100%; width: 0%; transition: width 0.3s; border-radius: 4px; }
+  .progress .bar { background: linear-gradient(90deg, #1a3a1a, #2a5a2a); height: 100%; width: 0%; transition: width 0.3s; border-radius: 4px; }
   .progress .status { font-size: 0.85rem; color: #555; margin-top: 0.5rem; }
+  .progress .elapsed { font-size: 0.75rem; color: #999; margin-top: 0.2rem; }
+  .progress .step-list { margin-top: 0.5rem; }
+  .progress .step-item { font-size: 0.8rem; color: #999; padding: 2px 0; }
+  .progress .step-item.active { color: #1a3a1a; font-weight: 600; }
+  .progress .step-item.done { color: #2a5a2a; }
+  .progress .step-item.done::before { content: "\\2713 "; color: #2a5a2a; }
+  .progress .step-item.active::before { content: ""; display: inline-block; width: 12px; height: 12px; border: 2px solid #1a3a1a; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 4px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .results { display: none; }
   .result-section { border: 1px solid #dde5dd; border-radius: 8px; margin-bottom: 1.5rem; overflow: hidden; }
   .result-header { background: #f0f4f0; padding: 0.8rem 1.2rem; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
@@ -182,7 +190,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="header">
   <div>
     <h1>CMC Quoting Toolkit</h1>
-    <div class="sub">Sheet metal &amp; machined part analysis from STEP, PDF &amp; DWG files</div>
+    <div class="sub">Sheet-metal geometry extraction and quoting data from STEP, PDF &amp; DWG files</div>
   </div>
 </div>
 <div class="container">
@@ -251,7 +259,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft Quoting Toolkit v2.3</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.0</div>
 
 <script>
 // --- Tab switching ---
@@ -330,6 +338,19 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
   progress.style.display = "block";
   document.getElementById("resultsCard").style.display = "none";
 
+  // Elapsed time tracker
+  const startTime = Date.now();
+  let elapsedEl = progress.querySelector('.elapsed');
+  if (!elapsedEl) { elapsedEl = document.createElement('div'); elapsedEl.className = 'elapsed'; progress.appendChild(elapsedEl); }
+  const elapsedTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    elapsedEl.textContent = 'Elapsed: ' + s + 's';
+  }, 1000);
+
+  // Step list for current file
+  let stepListEl = progress.querySelector('.step-list');
+  if (!stepListEl) { stepListEl = document.createElement('div'); stepListEl.className = 'step-list'; progress.appendChild(stepListEl); }
+
   const density = materialSel.value === "custom"
     ? document.getElementById("customDensity").value
     : materialSel.value;
@@ -339,10 +360,33 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
   const allResults = [];
   const totalFiles = selectedFiles.length;
 
+  function showSteps(filename, ext) {
+    const isDrawing = ['pdf','dwg','dxf'].includes(ext);
+    const steps = isDrawing
+      ? ['Uploading file', 'Extracting text & dimensions', 'Classifying fab type', 'Generating reports']
+      : ['Uploading file', 'Extracting geometry', 'Classifying features', 'Generating flat pattern', 'Building report PDF'];
+    stepListEl.innerHTML = steps.map((s, i) =>
+      '<div class="step-item' + (i === 0 ? ' active' : '') + '">' + s + '</div>'
+    ).join('');
+    // Simulate step progression
+    let stepIdx = 0;
+    const stepInterval = setInterval(() => {
+      stepIdx++;
+      if (stepIdx >= steps.length) { clearInterval(stepInterval); return; }
+      const items = stepListEl.querySelectorAll('.step-item');
+      items.forEach((el, j) => {
+        el.className = 'step-item' + (j < stepIdx ? ' done' : (j === stepIdx ? ' active' : ''));
+      });
+    }, 2500);
+    return stepInterval;
+  }
+
   for (let i = 0; i < totalFiles; i++) {
     const f = selectedFiles[i];
+    const ext = f.name.split('.').pop().toLowerCase();
     status.textContent = "Processing " + f.name + " (" + (i+1) + "/" + totalFiles + ")...";
     bar.style.width = ((i / totalFiles) * 80) + "%";
+    const stepTimer = showSteps(f.name, ext);
 
     const form = new FormData();
     form.append("step_file", f);
@@ -361,9 +405,16 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
     } catch (err) {
       allResults.push({ filename: f.name, error: err.message });
     }
+    clearInterval(stepTimer);
     bar.style.width = (((i+1) / totalFiles) * 100) + "%";
+    // Mark all steps done
+    stepListEl.querySelectorAll('.step-item').forEach(el => el.className = 'step-item done');
   }
 
+  clearInterval(elapsedTimer);
+  const totalSec = Math.floor((Date.now() - startTime) / 1000);
+  elapsedEl.textContent = 'Completed in ' + totalSec + 's';
+  stepListEl.innerHTML = '';
   status.textContent = "Done! " + allResults.filter(r => !r.error).length + "/" + totalFiles + " files processed.";
   renderResults(allResults);
   submitBtn.disabled = false;
@@ -453,30 +504,88 @@ function renderResults(results) {
 }
 
 function renderSheetMetal(g, env, dims) {
+  // Gauge display
+  var gaugeStr = g.gauge ? (g.gauge + ' GA') : '';
+  var thicknessDisplay = g.thickness_in + '"' + (gaugeStr ? ' <span style="color:#2a5a2a;font-weight:600">(' + gaugeStr + ')</span>' : '');
+
   let html = '<div class="geo-grid">' +
     '<div class="geo-stat"><div class="value">' + dims + '</div><div class="label">Overall Dimensions</div></div>' +
-    '<div class="geo-stat"><div class="value">' + g.thickness_in + '"</div><div class="label">Sheet Thickness</div></div>' +
+    '<div class="geo-stat"><div class="value">' + thicknessDisplay + '</div><div class="label">Sheet Thickness</div></div>' +
     '<div class="geo-stat"><div class="value">' + g.num_bends + '</div><div class="label">Bends</div></div>' +
     '<div class="geo-stat"><div class="value">' + env.mass_lb.toFixed(2) + ' lb</div><div class="label">Est. Weight</div></div>' +
-    '<div class="geo-stat"><div class="value">' + g.flat_width_in + '"</div><div class="label">Flat/Dev Width</div></div>' +
-    '<div class="geo-stat"><div class="value">' + (g.flat_length_in || '-') + '"</div><div class="label">Flat/Dev Length</div></div>' +
-    '<div class="geo-stat"><div class="value">' + g.features_raw_count + '</div><div class="label">Features</div></div>' +
+    '<div class="geo-stat"><div class="value">' + g.flat_width_in + '"</div><div class="label" title="Developed width after unfolding all bends">Flat/Dev Width</div></div>' +
+    '<div class="geo-stat"><div class="value">' + (g.flat_length_in || '-') + '"</div><div class="label" title="Length along the bend axis direction">Flat/Dev Length</div></div>' +
     '</div>';
+
+  // Complexity indicator
+  if (g.complexity) {
+    var cx = g.complexity;
+    var barColors = {1:'#4caf50',2:'#8bc34a',3:'#ff9800',4:'#f44336',5:'#b71c1c'};
+    html += '<div style="display:flex;gap:1rem;margin:0.8rem 0;align-items:center;flex-wrap:wrap">';
+    html += '<div style="background:#f8f8f0;border:1px solid #ddd;border-radius:6px;padding:0.5rem 1rem;flex:1;min-width:140px">' +
+      '<div style="font-size:0.75rem;color:#666">Cut Complexity</div>' +
+      '<div style="background:#e0e0e0;height:6px;border-radius:3px;margin:4px 0"><div style="width:' + (cx.cut_score*20) + '%;height:100%;border-radius:3px;background:' + barColors[cx.cut_score] + '"></div></div>' +
+      '<div style="font-size:0.8rem;font-weight:600">' + cx.cut_score + '/5</div></div>';
+    html += '<div style="background:#f8f8f0;border:1px solid #ddd;border-radius:6px;padding:0.5rem 1rem;flex:1;min-width:140px">' +
+      '<div style="font-size:0.75rem;color:#666">Bend Complexity</div>' +
+      '<div style="background:#e0e0e0;height:6px;border-radius:3px;margin:4px 0"><div style="width:' + (cx.bend_score*20) + '%;height:100%;border-radius:3px;background:' + barColors[cx.bend_score] + '"></div></div>' +
+      '<div style="font-size:0.8rem;font-weight:600">' + cx.bend_score + '/5</div></div>';
+    html += '<div style="background:' + barColors[cx.overall_score] + ';color:#fff;border-radius:6px;padding:0.5rem 1rem;text-align:center;min-width:120px">' +
+      '<div style="font-size:0.75rem;opacity:0.85">Overall</div>' +
+      '<div style="font-size:1.1rem;font-weight:700">' + cx.overall_label + '</div></div>';
+    html += '</div>';
+    if (cx.notes && cx.notes.length) {
+      html += '<div style="margin-bottom:0.8rem">';
+      cx.notes.forEach(function(n) {
+        html += '<span style="display:inline-block;background:#fff3e0;border:1px solid #ffe0b2;border-radius:3px;padding:2px 8px;font-size:0.75rem;margin:2px">' + n + '</span>';
+      });
+      html += '</div>';
+    }
+  }
+
   html += '<table class="detail-table">' +
     '<tr><th>Bend radius</th><td>' + g.bend_radius_in + '"</td></tr>' +
-    '<tr><th>Bend angles</th><td>' + (g.bend_angles_deg.length ? g.bend_angles_deg.join(", ") + ' deg' : 'None') + '</td></tr>' +
-    '<tr><th>K-factor used</th><td>' + g.k_factor_assumed + ' <span style="color:#888;font-size:0.85em">(' + (g.k_factor_source || 'default') + ')</span></td></tr>' +
-    '<tr><th>Mass (metric)</th><td>' + env.mass_kg.toFixed(3) + ' kg</td></tr>' +
-    '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm3</td></tr>' +
-    '<tr><th>Surface area</th><td>' + env.area_mm2.toFixed(1) + ' mm2</td></tr>' +
-    '<tr><th>Feature breakdown</th><td>' + (function() {
-      if (!g.features || !g.features.length) return 'None';
-      var counts = {};
-      g.features.forEach(function(f) { counts[f.type] = (counts[f.type] || 0) + 1; });
-      return Object.keys(counts).map(function(k) { return counts[k] + ' ' + k; }).join(', ');
-    })() + '</td></tr>' +
-    '<tr><th>Unclassified features</th><td>' + (g.features_unclassified_count || 0) + '</td></tr>' +
+    '<tr><th>Bend angles</th><td>' + (g.bend_angles_deg.length ? g.bend_angles_deg.join(", ") + '&deg;' : 'None') + '</td></tr>' +
+    '<tr><th title="Neutral axis offset factor used for flat pattern development">K-factor used</th><td>' + g.k_factor_assumed + ' <span style="color:#888;font-size:0.85em">(' + (g.k_factor_source || 'default') + ')</span></td></tr>' +
+    '<tr><th>Mass</th><td>' + env.mass_lb.toFixed(2) + ' lb / ' + env.mass_kg.toFixed(3) + ' kg</td></tr>' +
+    '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm&sup3;</td></tr>' +
+    '<tr><th>Surface area</th><td>' + env.area_mm2.toFixed(1) + ' mm&sup2;</td></tr>' +
     '</table>';
+
+  // --- Feature detail table ---
+  if (g.features && g.features.length) {
+    var counts = {};
+    g.features.forEach(function(f) { counts[f.type] = (counts[f.type] || 0) + 1; });
+    var summaryStr = Object.keys(counts).map(function(k) { return counts[k] + ' ' + k; }).join(', ');
+    html += '<div style="margin:1rem 0"><h4 style="color:#1a3a1a;margin-bottom:0.5rem">Features (' + g.features.length + ': ' + summaryStr + ')</h4>';
+    html += '<table class="detail-table" style="font-size:0.8rem"><thead><tr><th style="width:5%">#</th><th style="width:18%">Type</th><th style="width:22%">Size</th><th style="width:25%">Hardware Hint</th><th style="width:15%">Position</th><th style="width:15%">Confidence</th></tr></thead><tbody>';
+    g.features.forEach(function(f, i) {
+      var size = '';
+      if (f.type === 'round') size = '&empty; ' + f.diameter_in + '"';
+      else if (f.type === 'square_or_rect') size = f.size_in[0] + '" x ' + f.size_in[1] + '"';
+      else if (f.type === 'slot') size = f.width_in + '" x ' + f.slot_length_in + '"';
+      else if (f.type === 'countersink') size = f.angle_deg + '&deg; near &empty;' + (f.near_hole_dia_in || '?') + '"';
+      else if (f.type === 'chamfer') size = f.angle_deg + '&deg;';
+
+      var hw = f.hardware_hint || '';
+      var confBadge = f.confidence === 'high' ? '<span style="color:#2a5a2a">high</span>' :
+                      f.confidence === 'medium' ? '<span style="color:#b8860b">med</span>' :
+                      '<span style="color:#c00">low</span>';
+      var pos = '';
+      if (f.length_in != null) pos = 'L:' + f.length_in + '"';
+      if (f.transverse_in != null) pos += (pos ? ' ' : '') + 'T:' + f.transverse_in + '"';
+
+      html += '<tr><td>' + (i+1) + '</td><td>' + f.type + '</td><td>' + size + '</td><td>' + hw + '</td><td style="font-size:0.75rem">' + pos + '</td><td>' + confBadge + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    if (g.features_unclassified_count > 0) {
+      html += '<div style="color:#888;font-size:0.8em;margin-top:4px">' + g.features_unclassified_count + ' unclassified feature face(s) filtered out</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div style="color:#888;margin:0.8rem 0">No cut features detected</div>';
+  }
+
   // Nesting estimate
   var fw = parseFloat(g.flat_width_in) || 0;
   var fl = parseFloat(g.flat_length_in) || 0;
@@ -567,7 +676,7 @@ function renderDrawingResult(r, idx) {
       const pgMat = (pg.materials && pg.materials.length) ? (pg.materials[0].name || pg.materials[0].raw_callout) : '';
       const pgFab = pg.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (pg.likely_fab_type || 'Unknown');
       const pgConf = pg.fab_type_confidence === 'high' ? '#2a5a2a' : (pg.fab_type_confidence === 'medium' ? '#b8860b' : '#888');
-      const pgLabel = pgPart ? ('Page ' + pg.page + '  - ' + pgPart) : ('Page ' + pg.page);
+      const pgLabel = pgPart ? ('Page ' + pg.page + ' - ' + pgPart) : ('Page ' + pg.page);
 
       html += '<div style="border:1px solid #ddd;border-radius:6px;margin-bottom:0.5rem;overflow:hidden">' +
         '<div onclick="togglePage(this)" data-target="' + pgId + '" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.8rem;background:#f8f8f8;border-bottom:1px solid #eee">' +
@@ -640,7 +749,7 @@ function renderDrawingResult(r, idx) {
       html += '</div></div>';
     });
   } else {
-    // Fallback: single-page or no per-page data  - show overall detail table
+    // Fallback: single-page or no per-page data - show overall detail table
     html += '<table class="detail-table">';
     if (d.materials && d.materials.length) {
       html += '<tr><th>Material callout(s)</th><td>' + d.materials.map(function(m) { return m.raw_callout; }).join(', ') + '</td></tr>';
@@ -680,8 +789,6 @@ function toggleResult(idx) {
   body.classList.toggle("collapsed");
 }
 
-function hideParent(el) { el.parentElement.style.display = "none"; }
-
 function togglePage(el) {
   var target = el.getAttribute("data-target");
   document.getElementById(target).classList.toggle("collapsed");
@@ -701,6 +808,7 @@ function exportCSV(idx) {
   rows.push(["Surface Area (mm2)", env.area_mm2.toFixed(1)]);
   if (g.fab_type === "sheet_metal") {
     rows.push(["Thickness (in)", g.thickness_in]);
+    rows.push(["Gauge", g.gauge || "N/A"]);
     rows.push(["Bends", g.num_bends]);
     rows.push(["Bend Radius (in)", g.bend_radius_in]);
     rows.push(["Bend Angles (deg)", (g.bend_angles_deg||[]).join("; ")]);
@@ -709,21 +817,35 @@ function exportCSV(idx) {
     rows.push(["K-Factor", g.k_factor_assumed]);
     rows.push(["K-Factor Source", g.k_factor_source || "default"]);
     rows.push(["Features", g.features_raw_count]);
+    if (g.complexity) {
+      rows.push(["Complexity", g.complexity.overall_label]);
+      rows.push(["Cut Complexity", g.complexity.cut_score + "/5"]);
+      rows.push(["Bend Complexity", g.complexity.bend_score + "/5"]);
+    }
   } else {
     rows.push(["Machining Type", g.machining_type || ""]);
     rows.push(["Material Removal %", ((g.material_removal_ratio||0)*100).toFixed(1)]);
     var fs = g.feature_summary || {};
     Object.keys(fs).forEach(function(k){rows.push(["Feature: "+k, fs[k]]);});
   }
-  var NL = String.fromCharCode(10);
-  var csv = rows.map(function(row){return row.map(function(c){var s=String(c);return '"'+s.replace(/"/g,'""')+'"';}).join(",");}).join(NL);
+  if (g.features && g.features.length) {
+    var counts = {};
+    g.features.forEach(function(f){counts[f.type]=(counts[f.type]||0)+1;});
+    Object.keys(counts).forEach(function(k){rows.push(["Feature: "+k, counts[k]]);});
+    // Per-feature detail rows
+    g.features.forEach(function(f, i) {
+      var detail = f.type;
+      if (f.diameter_in) detail += ' dia=' + f.diameter_in + '"';
+      if (f.size_in) detail += ' ' + f.size_in[0] + 'x' + f.size_in[1] + '"';
+      if (f.hardware_hint) detail += ' (' + f.hardware_hint + ')';
+      rows.push(["Feature #" + (i+1), detail]);
+    });
+  }
+  var csv = rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"';}).join(",");}).join("\\n");
   var blob = new Blob([csv], {type:"text/csv"});
   var a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  var fn = r.filename;
-  var dot = fn.lastIndexOf(".");
-  if (dot > 0) fn = fn.substring(0, dot);
-  a.download = fn + "_quote.csv";
+  a.download = r.filename.replace(/\\.[^.]+$/,"") + "_quote.csv";
   a.click();
 }
 
@@ -731,11 +853,9 @@ function printQuote(idx) {
   var el = document.getElementById("result-" + idx);
   if (!el) return;
   var w = window.open("","_blank");
-  w.document.write('<html><head><title>CMC Quote Sheet</title>');
-  w.document.write('<style>body{font-family:Arial,sans-serif;padding:20px;color:#222}h2{color:#2a5a2a;border-bottom:2px solid #2a5a2a;padding-bottom:8px}table{border-collapse:collapse;width:100%;margin:10px 0}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}th{background:#f0f0f0}img{max-width:200px;max-height:150px}.geo-grid{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0}.geo-stat{border:1px solid #ddd;border-radius:6px;padding:8px 12px;min-width:100px;text-align:center}.geo-stat .value{font-weight:bold;font-size:1.1em}.geo-stat .label{color:#666;font-size:0.8em}.nesting-box{margin:10px 0;padding:10px;background:#f8f8f0;border:1px solid #ddd;border-radius:6px}.nesting-box h4{margin:0 0 8px;color:#2a5a2a}.dl-row{display:none}</style>');
-  w.document.write('</head><body>');
+  w.document.write('<html><head><title>CMC Quote Sheet</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#222;}h2{color:#2a5a2a;border-bottom:2px solid #2a5a2a;padding-bottom:8px;}table{border-collapse:collapse;width:100%;margin:10px 0;}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px;}th{background:#f0f0f0;}img{max-width:200px;max-height:150px;}.geo-grid{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0;}.geo-stat{border:1px solid #ddd;border-radius:6px;padding:8px 12px;min-width:100px;text-align:center;}.geo-stat .value{font-weight:bold;font-size:1.1em;}.geo-stat .label{color:#666;font-size:0.8em;}.dl-row,.view-grid{display:flex;flex-wrap:wrap;gap:8px;}.view-item{text-align:center;}.nesting-box{margin:10px 0;padding:10px;background:#f8f8f0;border:1px solid #ddd;border-radius:6px;}.nesting-box h4{margin:0 0 8px 0;color:#2a5a2a;}.dl-row{display:none;}@media print{.dl-row{display:none !important;}}</style></head><body>');
   w.document.write('<h2>CMC Quoting Toolkit - Quote Sheet</h2>');
-  w.document.write('<div style="color:#888;margin-bottom:12px">Generated: ' + new Date().toLocaleString() + '</div>');
+  w.document.write('<div style="color:#888;margin-bottom:12px;">Generated: ' + new Date().toLocaleString() + '</div>');
   w.document.write(el.innerHTML);
   w.document.write('</body></html>');
   w.document.close();
@@ -805,9 +925,9 @@ def _generate_drawing_page_report(page_data, output_path, source_filename):
 
     pg_num = page_data.get("page", "?")
     part_num = page_data.get("part_info", {}).get("part_number", "")
-    title_text = f"Drawing Extraction â Page {pg_num}"
+    title_text = f"Drawing Extraction — Page {pg_num}"
     if part_num:
-        title_text += f" â {part_num}"
+        title_text += f" — {part_num}"
     story.append(Paragraph(title_text, title_style))
     story.append(Paragraph(f"Source: {source_filename}", normal))
     if page_data.get("summary"):
@@ -880,7 +1000,7 @@ def _generate_drawing_page_report(page_data, output_path, source_filename):
     if missing:
         story.append(Paragraph("Missing Information", subtitle_style))
         for mi in missing:
-            story.append(Paragraph(f"â¢ <b>{mi['field']}</b>: {mi['message']}", normal))
+            story.append(Paragraph(f"• <b>{mi['field']}</b>: {mi['message']}", normal))
         story.append(Spacer(1, 8))
 
     doc.build(story)
@@ -1050,7 +1170,7 @@ def analyze():
         if "no solid bodies" in stderr.lower() or "wireframe" in stderr.lower():
             msg = "This STEP file contains no solid geometry (may be a wireframe or surface model)."
         elif "assembly" in stderr.lower():
-            msg = f"Assembly detected â analyzed largest solid. Details: {stderr[-200:]}"
+            msg = f"Assembly detected — analyzed largest solid. Details: {stderr[-200:]}"
         elif "degenerate" in stderr.lower() or "zero volume" in stderr.lower():
             msg = "The geometry appears degenerate or has zero volume."
         else:
