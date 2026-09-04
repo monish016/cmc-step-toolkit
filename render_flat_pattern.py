@@ -24,9 +24,15 @@ def render(json_path="geometry_extract.json", out_path="flat_pattern.png"):
     features = g["features"]
     lengths = [f["length_in"] for f in features if f.get("length_in") is not None]
     LEN = max(lengths) + 1.0 if lengths else 10.0
-    # if envelope length is available and bigger, prefer it (covers featureless margins)
-    env_len_in = g["envelope"]["bbox_mm"]["xlen"] / 25.4
-    LEN = max(LEN, env_len_in)
+    # Use computed flat length along bend axis (not hardcoded xlen)
+    flat_len_in = g.get("flat_length_in")
+    if flat_len_in and flat_len_in > 0:
+        LEN = max(LEN, flat_len_in)
+    else:
+        # Fallback: envelope max dimension
+        bbox = g["envelope"]["bbox_mm"]
+        env_len_in = max(bbox["xlen"], bbox["ylen"], bbox["zlen"]) / 25.4
+        LEN = max(LEN, env_len_in)
 
     fig, ax = plt.subplots(figsize=(16, 4.2))
 
