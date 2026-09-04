@@ -212,10 +212,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <option value="custom">Custom density...</option>
             </select>
           </div>
-          <div class="param-group">
-            <label for="kfactor">K-Factor (bend allowance)</label>
-            <input type="number" id="kfactor" name="k_factor" value="0.44" step="0.01" min="0.1" max="0.9">
-          </div>
           <div class="param-group" id="customDensityGroup" style="display:none">
             <label for="customDensity">Custom density (g/cm3)</label>
             <input type="number" id="customDensity" name="custom_density" value="7.9" step="0.01" min="0.5" max="25">
