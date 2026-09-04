@@ -458,7 +458,7 @@ function renderSheetMetal(g, env, dims) {
   html += '<table class="detail-table">' +
     '<tr><th>Bend radius</th><td>' + g.bend_radius_in + '"</td></tr>' +
     '<tr><th>Bend angles</th><td>' + (g.bend_angles_deg.length ? g.bend_angles_deg.join(", ") + ' deg' : 'None') + '</td></tr>' +
-    '<tr><th>K-factor used</th><td>' + g.k_factor_assumed + '</td></tr>' +
+    '<tr><th>K-factor used</th><td>' + g.k_factor_assumed + ' <span style="color:#888;font-size:0.85em">(' + (g.k_factor_source || 'default') + ')</span></td></tr>' +
     '<tr><th>Mass (metric)</th><td>' + env.mass_kg.toFixed(3) + ' kg</td></tr>' +
     '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm3</td></tr>' +
     '<tr><th>Surface area</th><td>' + env.area_mm2.toFixed(1) + ' mm2</td></tr>' +
