@@ -828,6 +828,8 @@ def analyze():
         k_factor = float(request.form.get("k_factor", 0.44))
     except (ValueError, TypeError):
         density, k_factor = 7.9, 0.44
+    # Map density to material type for K-factor table lookup
+    material = "stainless" if density >= 7.85 and density <= 7.95 else "steel"
 
     # create job directory
     job_id = str(uuid.uuid4())[:12]
@@ -927,7 +929,7 @@ def analyze():
         subprocess.run([
             "python3", os.path.join(script_dir, "step_quote_extract.py"),
             step_path, "--density", str(density), "--k", str(k_factor),
-            "--out", json_path
+            "--material", material, "--out", json_path
         ], check=True, capture_output=True, text=True, timeout=120)
 
         # 2. render views (non-fatal - may OOM on limited memory)
