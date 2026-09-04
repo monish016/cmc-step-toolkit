@@ -29,6 +29,53 @@ from OCP.TopExp import TopExp_Explorer
 from OCP.TopAbs import TopAbs_EDGE
 from OCP.TopoDS import TopoDS
 
+# ==========================================================================
+# CMC K-FACTOR LOOKUP TABLES
+# Green-highlighted (recommended) values from CMC press brake tables.
+# Key: thickness_in -> list of (bend_radius_in, k_factor) sorted by preference.
+# ==========================================================================
+_CMC_KFACTOR_STEEL = {
+    0.030: [(0.078, 0.406), (0.109, 0.487)],
+    0.036: [(0.078, 0.406), (0.109, 0.487)],
+    0.048: [(0.078, 0.406), (0.109, 0.487), (0.141, 0.500)],
+    0.060: [(0.078, 0.406), (0.109, 0.487), (0.141, 0.500)],
+    0.075: [(0.078, 0.406), (0.109, 0.487), (0.141, 0.500)],
+    0.105: [(0.109, 0.406), (0.141, 0.487), (0.203, 0.500)],
+    0.120: [(0.141, 0.438), (0.203, 0.487)],
+    0.135: [(0.141, 0.438), (0.203, 0.487)],
+    0.188: [(0.203, 0.406), (0.313, 0.390)],
+    0.250: [(0.250, 0.435), (0.313, 0.396)],
+    0.375: [(0.406, 0.380)],
+    0.500: [(0.406, 0.380), (0.500, 0.406)],
+}
+_CMC_KFACTOR_STAINLESS = {
+    0.030: [(0.078, 0.406), (0.109, 0.487)],
+    0.036: [(0.078, 0.406), (0.109, 0.487)],
+    0.048: [(0.078, 0.406), (0.109, 0.487), (0.141, 0.500)],
+    0.060: [(0.078, 0.406), (0.109, 0.487), (0.141, 0.500)],
+    0.075: [(0.078, 0.406), (0.109, 0.487), (0.141, 0.500)],
+    0.105: [(0.109, 0.406), (0.141, 0.487), (0.203, 0.500)],
+    0.120: [(0.141, 0.438), (0.203, 0.487)],
+    0.135: [(0.141, 0.438), (0.203, 0.487)],
+    0.188: [(0.203, 0.406), (0.313, 0.390)],
+    0.250: [(0.250, 0.435), (0.313, 0.396)],
+    0.375: [(0.406, 0.452)],
+    0.500: [(0.406, 0.452), (0.500, 0.406)],
+}
+
+def lookup_k_factor(thickness_in, bend_radius_in=None, material="steel"):
+    """Look up CMC-recommended K-factor from press brake tables."""
+    table = _CMC_KFACTOR_STAINLESS if "stainless" in material.lower() else _CMC_KFACTOR_STEEL
+    best_thick = min(table.keys(), key=lambda t: abs(t - thickness_in))
+    if abs(best_thick - thickness_in) / max(thickness_in, 0.001) > 0.15:
+        return (0.44, None, "default (no table match)")
+    entries = table[best_thick]
+    if bend_radius_in is not None and bend_radius_in > 0:
+        best = min(entries, key=lambda e: abs(e[0] - bend_radius_in))
+        return (best[1], best[0], "CMC table (gauge " + str(best_thick) + '\")')
+    else:
+        return (entries[0][1], entries[0][0], "CMC table (gauge " + str(best_thick) + '\")')
+
 
 # --------------------------------------------------------------------------
 # 1. LOAD + ENVELOPE
@@ -1001,6 +1048,12 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
     if bend_radius_mm is not None and bend_radius_mm < 1e-6:
         bend_radius_mm = thickness_mm  # fallback to thickness
 
+    # --- CMC K-factor lookup ---
+    thickness_in = thickness_mm / 25.4
+    bend_radius_in = (bend_radius_mm / 25.4) if bend_radius_mm else None
+    looked_up_k, matched_br, k_source = lookup_k_factor(thickness_in, bend_radius_in)
+    k_factor = looked_up_k  # override default with table value
+
     axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
     bb = envelope["bbox_mm"]
     cut_point = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
@@ -1082,6 +1135,8 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
         "num_bends": len(bend_lines),
         "bend_angles_deg": sorted([round(b["angle_deg"],1) for b in bend_lines]),
         "k_factor_assumed": k_factor,
+        "k_factor_source": k_source,
+        "k_factor_matched_bend_radius_in": matched_br,
         "flat_width_in": round(flat_width_mm/25.4, 3),
         "flat_length_in": round(flat_length_mm/25.4, 3),
         "layout_segments": [
