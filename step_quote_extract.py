@@ -815,14 +815,17 @@ def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
             cylg = surf.Cylinder()
             r = cylg.Radius()
             sweep_deg = math.degrees(surf.LastUParameter() - surf.FirstUParameter())
-            if r < 8:
-                # Skip very tiny cylindrical faces (micro edge blends)
-                if area < 0.3:
-                    continue
-                candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
-                                    "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area,
-                                    "kind": "cyl", "radius": r,
-                                    "u_sweep": sweep_deg})
+            # Skip very tiny cylindrical faces (micro edge blends)
+            if area < 0.3:
+                continue
+            # Allow holes up to ~4" diameter (50mm radius).
+            # Larger cylinders are likely outer contour, not holes.
+            if r > 50:
+                continue
+            candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
+                                "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area,
+                                "kind": "cyl", "radius": r,
+                                "u_sweep": sweep_deg})
     return candidates
 
 
