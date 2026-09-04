@@ -546,7 +546,7 @@ function renderDrawingResult(r, idx) {
       const pgLabel = pgPart ? ('Page ' + pg.page + ' â ' + pgPart) : ('Page ' + pg.page);
 
       html += '<div style="border:1px solid #ddd;border-radius:6px;margin-bottom:0.5rem;overflow:hidden">' +
-        '<div onclick="document.getElementById(\'' + pgId + '\').classList.toggle(\'collapsed\')" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.8rem;background:#f8f8f8;border-bottom:1px solid #eee">' +
+        '<div onclick="togglePage(this)" data-target="' + pgId + '" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.8rem;background:#f8f8f8;border-bottom:1px solid #eee">' +
         '<span style="font-weight:600;font-size:0.85rem">' + pgLabel + '</span>' +
         '<div>' +
         (pgMat ? '<span class="badge" style="background:#555;font-size:0.7rem">' + pgMat + '</span> ' : '') +
@@ -654,6 +654,11 @@ function renderDrawingResult(r, idx) {
 function toggleResult(idx) {
   const body = document.getElementById("result-" + idx);
   body.classList.toggle("collapsed");
+}
+
+function togglePage(el) {
+  var target = el.getAttribute("data-target");
+  document.getElementById(target).classList.toggle("collapsed");
 }
 
 // --- History ---
