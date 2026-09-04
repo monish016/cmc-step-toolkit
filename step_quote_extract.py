@@ -920,6 +920,10 @@ def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
             # Larger cylinders are likely outer contour, not holes.
             if r > 50:
                 continue
+            # Skip very small sweep arcs (< 45 deg) -- these are edge
+            # blends or tiny fillets, never standalone features.
+            if sweep_deg < 45:
+                continue
             candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
                                 "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area,
                                 "kind": "cyl", "radius": r,
@@ -958,24 +962,31 @@ def merge_slot_pairs(clusters):
         planars = [x for x in m if x["kind"] == "planar"]
         if cyls and not planars and len(m) <= 2:
             r = sum(c["radius"] for c in cyls) / len(cyls)
+            avg_sweep = sum(c.get("u_sweep", 360) for c in cyls) / len(cyls)
             cx = sum(c["center"][0] for c in cyls) / len(cyls)
             cy = sum(c["center"][1] for c in cyls) / len(cyls)
             cz = sum(c["center"][2] for c in cyls) / len(cyls)
-            cyl_only.append({"r": r, "center": (cx, cy, cz), "used": False, "orig": m})
+            cyl_only.append({"r": r, "center": (cx, cy, cz), "used": False, "orig": m,
+                                 "avg_sweep": avg_sweep})
         else:
             remaining.append(m)
     slots = []
     for i in range(len(cyl_only)):
         if cyl_only[i]["used"]:
             continue
+        # Skip corner radii / edge fillets (sweep < 140 deg) from slot pairing
+        if cyl_only[i].get("avg_sweep", 360) < 140:
+            continue
         for j in range(i+1, len(cyl_only)):
             if cyl_only[j]["used"]:
+                continue
+            if cyl_only[j].get("avg_sweep", 360) < 140:
                 continue
             a, b = cyl_only[i], cyl_only[j]
             if abs(a["r"] - b["r"]) > 0.05:
                 continue
             d = math.dist(a["center"], b["center"])
-            if 2*a["r"] < d < 30.0:
+            if 2*a["r"] < d < 200.0:
                 diffs = sorted(abs(a["center"][k]-b["center"][k]) for k in range(3))
                 if diffs[0] < 1.0 and diffs[1] < 3.0:
                     a["used"] = b["used"] = True
@@ -1045,6 +1056,18 @@ def classify_cluster(members):
         if partial_cyls and len(partial_cyls) >= 4 and n_planar == 0:
             avg_sweep = sum(c["u_sweep"] for c in partial_cyls) / len(partial_cyls)
             if 70 < avg_sweep < 110:  # ~90Â° corner fillets
+                # First check: if total sweep ~360 and all radii match,
+                # this is a round hole split into quadrants, not a rect cutout
+                total_sw = sum(c["u_sweep"] for c in partial_cyls)
+                radii_pc = [c["radius"] for c in partial_cyls]
+                r_spread_pc = max(radii_pc) - min(radii_pc) if radii_pc else 999
+                if total_sw > 300 and r_spread_pc < 0.5:
+                    r_avg = sum(radii_pc) / len(radii_pc)
+                    if r_avg * 2 / 25.4 >= 0.08:
+                        dia_in = 2 * r_avg / 25.4
+                        return {"type": "round",
+                                "diameter_in": round(dia_in, 3), "center": (cx, cy, cz),
+                                "confidence": "medium"}
                 xl, yl, zl = spread
                 dims = sorted([xl, yl, zl], reverse=True)
                 d1, d2 = dims[0], dims[1]
