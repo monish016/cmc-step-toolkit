@@ -452,6 +452,7 @@ function renderSheetMetal(g, env, dims) {
     '<div class="geo-stat"><div class="value">' + g.num_bends + '</div><div class="label">Bends</div></div>' +
     '<div class="geo-stat"><div class="value">' + env.mass_lb.toFixed(2) + ' lb</div><div class="label">Est. Weight</div></div>' +
     '<div class="geo-stat"><div class="value">' + g.flat_width_in + '"</div><div class="label">Flat/Dev Width</div></div>' +
+    '<div class="geo-stat"><div class="value">' + (g.flat_length_in || '-') + '"</div><div class="label">Flat/Dev Length</div></div>' +
     '<div class="geo-stat"><div class="value">' + g.features_raw_count + '</div><div class="label">Features</div></div>' +
     '</div>';
   html += '<table class="detail-table">' +
