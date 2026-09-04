@@ -180,7 +180,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="header">
   <div>
     <h1>CMC Quoting Toolkit</h1>
-    <div class="sub">Sheet-metal geometry extraction and quoting data from STEP, PDF &amp; DWG files</div>
+    <div class="sub">Sheet metal &amp; machined part analysis from STEP, PDF &amp; DWG files</div>
   </div>
 </div>
 <div class="container">
