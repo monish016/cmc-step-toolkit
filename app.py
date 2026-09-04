@@ -151,8 +151,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .dl-row { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-top: 1rem; }
   .dl-btn { display: inline-block; background: #2a5a2a; color: #fff; padding: 0.5rem 1.2rem; border-radius: 4px; text-decoration: none; font-weight: 600; font-size: 0.85rem; }
   .dl-btn:hover { background: #1a3a1a; }
-  .dl-btn.secondary { background: #555; }
+  .dl-btn.secondary { background: #555; border: none; cursor: pointer; }
   .dl-btn.secondary:hover { background: #333; }
+  .nesting-box { margin: 1rem 0; padding: 0.8rem; background: #f8f8f0; border: 1px solid #ddd; border-radius: 6px; }
+  .nesting-box h4 { margin: 0 0 0.5rem 0; color: #2a5a2a; font-size: 0.95rem; }
   .error { color: #c00; background: #fff0f0; border: 1px solid #fcc; border-radius: 6px; padding: 1rem; margin-top: 1rem; display: none; }
   .history-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .history-table th, .history-table td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #eee; text-align: left; }
@@ -208,7 +210,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <select id="material" name="material">
               <option value="7.9">Stainless Steel (SUS304) - 7.9 g/cm3</option>
               <option value="7.85">Mild/Carbon Steel - 7.85 g/cm3</option>
-              <option value="2.70">Aluminum - 2.70 g/cm3</option>
+              <option value="7.85_galv">Galvanized Steel - 7.85 g/cm3</option>
+              <option value="2.71">Aluminum 6061 - 2.71 g/cm3</option>
+              <option value="2.68">Aluminum 5052 - 2.68 g/cm3</option>
+              <option value="8.96">Copper (C110) - 8.96 g/cm3</option>
+              <option value="8.53">Brass (C260) - 8.53 g/cm3</option>
               <option value="custom">Custom density...</option>
             </select>
           </div>
@@ -366,7 +372,9 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
 });
 
 // --- Render results ---
+var _allResults = [];
 function renderResults(results) {
+  _allResults = results;
   const rc = document.getElementById("resultsCard");
   rc.style.display = "block";
 
@@ -434,6 +442,8 @@ function renderResults(results) {
     html += '<div class="dl-row">' +
       '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download PDF Report</a>' +
       '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download JSON</a>' +
+      '<button class="dl-btn secondary" onclick="exportCSV(' + idx + ')">Export CSV</button>' +
+      '<button class="dl-btn secondary" onclick="printQuote(' + idx + ')">Print Quote</button>' +
       '</div>';
 
     html += '</div></div>';
@@ -466,6 +476,23 @@ function renderSheetMetal(g, env, dims) {
     })() + '</td></tr>' +
     '<tr><th>Unclassified features</th><td>' + (g.features_unclassified_count || 0) + '</td></tr>' +
     '</table>';
+  // Nesting estimate
+  var fw = parseFloat(g.flat_width_in) || 0;
+  var fl = parseFloat(g.flat_length_in) || 0;
+  if (fw > 0 && fl > 0) {
+    var sheets = [[48,96,"48 x 96"],[48,120,"48 x 120"],[60,120,"60 x 120"]];
+    var gap = 0.25; // kerf + spacing
+    var pw = fw + gap;
+    var pl = fl + gap;
+    html += '<div class="nesting-box"><h4>Nesting Estimate</h4><table class="detail-table"><tr><th>Sheet Size</th><th>Orientation A</th><th>Orientation B</th><th>Best Fit</th></tr>';
+    sheets.forEach(function(s) {
+      var nA = Math.floor(s[0]/pw) * Math.floor(s[1]/pl);
+      var nB = Math.floor(s[0]/pl) * Math.floor(s[1]/pw);
+      var best = Math.max(nA, nB);
+      html += '<tr><td>' + s[2] + '"</td><td>' + nA + ' pcs</td><td>' + nB + ' pcs</td><td><strong>' + best + ' pcs</strong></td></tr>';
+    });
+    html += '</table><div style="color:#888;font-size:0.8em;margin-top:4px">0.25" kerf/gap assumed</div></div>';
+  }
   return html;
 }
 
@@ -657,6 +684,60 @@ function togglePage(el) {
   document.getElementById(target).classList.toggle("collapsed");
 }
 
+function exportCSV(idx) {
+  var r = _allResults.filter(function(x){return !x.error;})[idx] || _allResults[idx];
+  if (!r || !r.geometry) return;
+  var g = r.geometry, env = g.envelope;
+  var rows = [["Field","Value"]];
+  rows.push(["Filename", r.filename]);
+  rows.push(["Fab Type", g.fab_type || "sheet_metal"]);
+  rows.push(["Dimensions (in)", (env.bbox_mm.xlen/25.4).toFixed(2)+' x '+(env.bbox_mm.ylen/25.4).toFixed(2)+' x '+(env.bbox_mm.zlen/25.4).toFixed(2)]);
+  rows.push(["Weight (lb)", env.mass_lb.toFixed(3)]);
+  rows.push(["Weight (kg)", env.mass_kg.toFixed(3)]);
+  rows.push(["Volume (mm3)", env.volume_mm3.toFixed(1)]);
+  rows.push(["Surface Area (mm2)", env.area_mm2.toFixed(1)]);
+  if (g.fab_type === "sheet_metal") {
+    rows.push(["Thickness (in)", g.thickness_in]);
+    rows.push(["Bends", g.num_bends]);
+    rows.push(["Bend Radius (in)", g.bend_radius_in]);
+    rows.push(["Bend Angles (deg)", (g.bend_angles_deg||[]).join("; ")]);
+    rows.push(["Flat Width (in)", g.flat_width_in]);
+    rows.push(["Flat Length (in)", g.flat_length_in || ""]);
+    rows.push(["K-Factor", g.k_factor_assumed]);
+    rows.push(["K-Factor Source", g.k_factor_source || "default"]);
+    rows.push(["Features", g.features_raw_count]);
+  } else {
+    rows.push(["Machining Type", g.machining_type || ""]);
+    rows.push(["Material Removal %", ((g.material_removal_ratio||0)*100).toFixed(1)]);
+    var fs = g.feature_summary || {};
+    Object.keys(fs).forEach(function(k){rows.push(["Feature: "+k, fs[k]]);});
+  }
+  if (g.features && g.features.length) {
+    var counts = {};
+    g.features.forEach(function(f){counts[f.type]=(counts[f.type]||0)+1;});
+    Object.keys(counts).forEach(function(k){rows.push(["Feature: "+k, counts[k]]);});
+  }
+  var csv = rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"';}).join(",");}).join("\n");
+  var blob = new Blob([csv], {type:"text/csv"});
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = r.filename.replace(/\.[^.]+$/,"") + "_quote.csv";
+  a.click();
+}
+
+function printQuote(idx) {
+  var el = document.getElementById("result-" + idx);
+  if (!el) return;
+  var w = window.open("","_blank");
+  w.document.write('<html><head><title>CMC Quote Sheet</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#222;}h2{color:#2a5a2a;border-bottom:2px solid #2a5a2a;padding-bottom:8px;}table{border-collapse:collapse;width:100%;margin:10px 0;}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px;}th{background:#f0f0f0;}img{max-width:200px;max-height:150px;}.geo-grid{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0;}.geo-stat{border:1px solid #ddd;border-radius:6px;padding:8px 12px;min-width:100px;text-align:center;}.geo-stat .value{font-weight:bold;font-size:1.1em;}.geo-stat .label{color:#666;font-size:0.8em;}.dl-row,.view-grid{display:flex;flex-wrap:wrap;gap:8px;}.view-item{text-align:center;}.nesting-box{margin:10px 0;padding:10px;background:#f8f8f0;border:1px solid #ddd;border-radius:6px;}.nesting-box h4{margin:0 0 8px 0;color:#2a5a2a;}.dl-row{display:none;}@media print{.dl-row{display:none !important;}}</style></head><body>');
+  w.document.write('<h2>CMC Quoting Toolkit - Quote Sheet</h2>');
+  w.document.write('<div style="color:#888;margin-bottom:12px;">Generated: ' + new Date().toLocaleString() + '</div>');
+  w.document.write(el.innerHTML);
+  w.document.write('</body></html>');
+  w.document.close();
+  w.print();
+}
+
 // --- History ---
 async function loadHistory() {
   try {
@@ -820,12 +901,21 @@ def analyze():
     is_drawing = file_ext in ("pdf", "dwg", "dxf")
 
     try:
-        density = float(request.form.get("density", 7.9))
+        raw_density = request.form.get("density", "7.9")
+        # Handle galvanized tag
+        if raw_density.endswith("_galv"):
+            density = float(raw_density.replace("_galv", ""))
+            material = "steel"  # galvanized uses steel K-factor table
+        else:
+            density = float(raw_density)
+            # Map density to material type for K-factor table lookup
+            if density >= 7.85 and density <= 7.95:
+                material = "stainless"
+            else:
+                material = "steel"
         k_factor = float(request.form.get("k_factor", 0.44))
     except (ValueError, TypeError):
-        density, k_factor = 7.9, 0.44
-    # Map density to material type for K-factor table lookup
-    material = "stainless" if density >= 7.85 and density <= 7.95 else "steel"
+        density, k_factor, material = 7.9, 0.44, "steel"
 
     # create job directory
     job_id = str(uuid.uuid4())[:12]
