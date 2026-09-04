@@ -63,6 +63,104 @@ _CMC_KFACTOR_STAINLESS = {
     0.500: [(0.406, 0.452), (0.500, 0.406)],
 }
 
+# ==========================================================================
+# GAUGE LOOKUP TABLE — Standard sheet metal gauges (inches)
+# ==========================================================================
+_GAUGE_TABLE = {
+    # gauge: (steel_in, stainless_in, aluminum_in)
+    7:  (0.1793, 0.1875, 0.1443),
+    8:  (0.1644, 0.1719, 0.1285),
+    9:  (0.1495, 0.1563, 0.1144),
+    10: (0.1345, 0.1406, 0.1019),
+    11: (0.1196, 0.1250, 0.0907),
+    12: (0.1046, 0.1094, 0.0808),
+    13: (0.0897, 0.0938, 0.0720),
+    14: (0.0747, 0.0781, 0.0641),
+    15: (0.0673, 0.0703, 0.0571),
+    16: (0.0598, 0.0625, 0.0508),
+    17: (0.0538, 0.0563, 0.0453),
+    18: (0.0478, 0.0500, 0.0403),
+    19: (0.0418, 0.0438, 0.0359),
+    20: (0.0359, 0.0375, 0.0320),
+    21: (0.0329, 0.0344, 0.0285),
+    22: (0.0299, 0.0313, 0.0253),
+    23: (0.0269, 0.0281, 0.0226),
+    24: (0.0239, 0.0250, 0.0201),
+    25: (0.0209, 0.0219, 0.0179),
+    26: (0.0179, 0.0188, 0.0159),
+    28: (0.0149, 0.0156, 0.0126),
+    30: (0.0120, 0.0125, 0.0100),
+}
+
+def lookup_gauge(thickness_in, material="steel"):
+    """Return (gauge_number, nominal_thickness_in) or (None, None) if no match."""
+    col = 1 if "stainless" in material.lower() else (2 if "aluminum" in material.lower() else 0)
+    best_ga, best_diff = None, 999
+    for ga, vals in _GAUGE_TABLE.items():
+        diff = abs(vals[col] - thickness_in)
+        if diff < best_diff:
+            best_diff = diff
+            best_ga = ga
+    # Only match if within 8% of a gauge entry
+    if best_ga and best_diff / max(thickness_in, 0.001) < 0.08:
+        return best_ga, _GAUGE_TABLE[best_ga][col]
+    return None, None
+
+
+# ==========================================================================
+# HARDWARE CALLOUT TABLE — standard hole sizes → likely fastener
+# ==========================================================================
+_HARDWARE_HOLES_IN = [
+    # (diameter_in, description)
+    # Metric clearance holes (close fit)
+    (0.126, "M3 clearance"),
+    (0.165, "M4 clearance"),
+    (0.209, "M5 clearance"),
+    (0.252, "M6 clearance"),
+    (0.323, "M8 clearance"),
+    (0.394, "M10 clearance"),
+    (0.512, "M12 clearance"),
+    # Metric tap drill holes
+    (0.098, "M3×0.5 tap drill"),
+    (0.136, "M4×0.7 tap drill"),
+    (0.169, "M5×0.8 tap drill"),
+    (0.197, "M6×1.0 tap drill"),
+    (0.260, "M8×1.25 tap drill"),
+    (0.323, "M10×1.5 tap drill"),
+    (0.397, "M12×1.75 tap drill"),
+    # Imperial clearance holes
+    (0.120, "#4 clearance"),
+    (0.144, "#6 clearance"),
+    (0.170, "#8 clearance"),
+    (0.196, "#10 clearance"),
+    (0.266, "1/4\" clearance"),
+    (0.332, "5/16\" clearance"),
+    (0.397, "3/8\" clearance"),
+    (0.531, "1/2\" clearance"),
+    # Imperial tap drills
+    (0.089, "#4-40 tap drill"),
+    (0.106, "#6-32 tap drill"),
+    (0.136, "#8-32 tap drill"),
+    (0.149, "#10-24 tap drill"),
+    (0.159, "#10-32 tap drill"),
+    (0.201, "1/4\"-20 tap drill"),
+    (0.257, "5/16\"-18 tap drill"),
+    (0.316, "3/8\"-16 tap drill"),
+    (0.422, "1/2\"-13 tap drill"),
+]
+
+def lookup_hardware(diameter_in):
+    """Return the closest hardware callout if within 3% tolerance, else None."""
+    best, best_diff = None, 999
+    for dia, desc in _HARDWARE_HOLES_IN:
+        diff = abs(dia - diameter_in)
+        if diff < best_diff:
+            best_diff = diff
+            best = desc
+    if best and best_diff / max(diameter_in, 0.001) < 0.03:
+        return best
+    return None
+
 def lookup_k_factor(thickness_in, bend_radius_in=None, material="steel"):
     """Look up CMC-recommended K-factor from press brake tables."""
     table = _CMC_KFACTOR_STAINLESS if "stainless" in material.lower() else _CMC_KFACTOR_STEEL
@@ -1003,6 +1101,73 @@ def classify_cluster(members):
 
 
 # ==========================================================================
+def _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thickness_mm):
+    """
+    Compute relative complexity scores for laser cutting and bending.
+    Returns dict with scores (1-5 scale) and notes.
+    """
+    notes = []
+
+    # --- Laser/cut complexity ---
+    n_features = len([f for f in features if f["type"] in ("round", "square_or_rect", "slot")])
+    cut_score = 1
+    if n_features > 20:
+        cut_score = 5
+        notes.append("Very high feature count (>20)")
+    elif n_features > 10:
+        cut_score = 4
+    elif n_features > 5:
+        cut_score = 3
+    elif n_features > 2:
+        cut_score = 2
+
+    # Small features increase complexity
+    small_holes = [f for f in features if f["type"] == "round" and f.get("diameter_in", 1) < 0.15]
+    if small_holes:
+        cut_score = min(5, cut_score + 1)
+        notes.append(f"{len(small_holes)} small hole(s) <0.15\" dia")
+
+    # Check hole-to-thickness ratio (holes smaller than thickness are difficult)
+    thickness_in = thickness_mm / 25.4
+    tiny_holes = [f for f in features if f["type"] == "round"
+                  and f.get("diameter_in", 1) < thickness_in]
+    if tiny_holes:
+        cut_score = min(5, cut_score + 1)
+        notes.append(f"{len(tiny_holes)} hole(s) smaller than material thickness")
+
+    # --- Bend complexity ---
+    bend_score = 1
+    n_bends = len(bend_lines)
+    if n_bends > 6:
+        bend_score = 5
+        notes.append("Many bends (>6)")
+    elif n_bends > 4:
+        bend_score = 4
+    elif n_bends > 2:
+        bend_score = 3
+    elif n_bends > 0:
+        bend_score = 2
+
+    # Non-90° bends increase complexity
+    non_90 = [b for b in bend_lines if abs(b["angle_deg"] - 90) > 5]
+    if non_90:
+        bend_score = min(5, bend_score + 1)
+        notes.append(f"{len(non_90)} non-90° bend(s)")
+
+    # --- Overall complexity ---
+    overall = max(cut_score, bend_score)
+    labels = {1: "Simple", 2: "Standard", 3: "Moderate", 4: "Complex", 5: "Very Complex"}
+
+    return {
+        "cut_score": cut_score,
+        "bend_score": bend_score,
+        "overall_score": overall,
+        "overall_label": labels[overall],
+        "notes": notes,
+    }
+
+
+# ==========================================================================
 # 5. MAIN DRIVER â unified entry point
 # ==========================================================================
 def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json", material="steel"):
@@ -1055,7 +1220,7 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json",
     return result
 
 
-def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor, material="steel"):
+def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, material="steel"):
     """Sheet metal analysis path (original logic)."""
     thickness_mm, bend_radius_mm, bend_lines = detect_bend_faces(cyl)
 
@@ -1146,8 +1311,59 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor, materi
         t_mm = transverse_pos_mm(yz)
         feat["transverse_in"] = round(t_mm/25.4, 3) if t_mm is not None else None
 
+    # --- Gauge auto-detection ---
+    gauge_num, gauge_nominal = lookup_gauge(thickness_mm / 25.4, material)
+
+    # --- Hardware callouts for features ---
+    for feat in features:
+        if feat["type"] == "round" and "diameter_in" in feat:
+            hw = lookup_hardware(feat["diameter_in"])
+            if hw:
+                feat["hardware_hint"] = hw
+
+    # --- Countersink / chamfer detection ---
+    # Look for cone faces near round holes
+    countersinks = []
+    chamfers = []
+    for i, f, s in other_faces:
+        st = s.GetType()
+        if st == GeomAbs_Cone:
+            area = f.Area()
+            ctr = f.Center()
+            cone_center = (ctr.x, ctr.y, ctr.z)
+            cone = s.Cone()
+            half_angle_deg = math.degrees(cone.SemiAngle())
+            # Check if near a round hole
+            matched_hole = False
+            for feat in features:
+                if feat["type"] == "round":
+                    d = math.dist(cone_center, feat["center"])
+                    if d < 8.0:  # within 8mm of a hole center
+                        countersinks.append({
+                            "type": "countersink",
+                            "angle_deg": round(abs(half_angle_deg) * 2, 1),
+                            "near_hole_dia_in": feat["diameter_in"],
+                            "center": cone_center,
+                            "confidence": "medium",
+                        })
+                        matched_hole = True
+                        break
+            if not matched_hole and area > 2.0:
+                chamfers.append({
+                    "type": "chamfer",
+                    "angle_deg": round(abs(half_angle_deg), 1),
+                    "center": cone_center,
+                    "confidence": "low",
+                })
+    features.extend(countersinks)
+    # Only add chamfers if there are a meaningful number (otherwise noise)
+    if len(chamfers) <= 8:
+        features.extend(chamfers)
+
     return {
         "thickness_in": round(thickness_mm/25.4, 4),
+        "gauge": gauge_num,
+        "gauge_nominal_in": gauge_nominal,
         "bend_radius_in": round(bend_radius_mm/25.4, 4) if bend_radius_mm else None,
         "num_bends": len(bend_lines),
         "bend_angles_deg": sorted([round(b["angle_deg"],1) for b in bend_lines]),
@@ -1165,8 +1381,9 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor, materi
         "features_unclassified_count": unclassified_count,
         "features": features,
         "processes": ["blanking", "bending"] + (
-            ["tapping (check manually)"] if any(f["type"] == "round" and f["diameter_in"] < 0.5 for f in features) else []
+            ["tapping (check manually)"] if any(f["type"] == "round" and f.get("diameter_in", 1) < 0.5 for f in features) else []
         ),
+        "complexity": _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thickness_mm),
     }
 
 
