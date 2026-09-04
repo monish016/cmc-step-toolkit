@@ -955,6 +955,20 @@ def classify_cluster(members):
                             "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                             "center": (cx, cy, cz), "confidence": "medium"}
 
+        # Case 3b: Multiple partial cylinders whose sweeps sum to ~360°
+        # = round hole split into segments by the CAD kernel (e.g. two 180° halves)
+        if partial_cyls and len(partial_cyls) >= 2 and n_planar <= 1:
+            total_sweep = sum(c["u_sweep"] for c in partial_cyls)
+            radii = [c["radius"] for c in partial_cyls]
+            r_spread = max(radii) - min(radii)
+            if total_sweep > 300 and r_spread < 0.5:  # matching radii, full circle
+                r_avg = sum(radii) / len(radii)
+                if r_avg * 2 / 25.4 < 0.08:
+                    return None
+                dia_in = 2 * r_avg / 25.4
+                return {"type": "round",
+                        "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+
         # Case 4: Mixed or ambiguous â fall back to checking if it's round
         if full_circle_cyls:
             radii = [c["radius"] for c in full_circle_cyls]
