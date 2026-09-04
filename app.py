@@ -566,7 +566,7 @@ function renderDrawingResult(r, idx) {
       const pgMat = (pg.materials && pg.materials.length) ? (pg.materials[0].name || pg.materials[0].raw_callout) : '';
       const pgFab = pg.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (pg.likely_fab_type || 'Unknown');
       const pgConf = pg.fab_type_confidence === 'high' ? '#2a5a2a' : (pg.fab_type_confidence === 'medium' ? '#b8860b' : '#888');
-      const pgLabel = pgPart ? ('Page ' + pg.page + ' â ' + pgPart) : ('Page ' + pg.page);
+      const pgLabel = pgPart ? ('Page ' + pg.page + '  - ' + pgPart) : ('Page ' + pg.page);
 
       html += '<div style="border:1px solid #ddd;border-radius:6px;margin-bottom:0.5rem;overflow:hidden">' +
         '<div onclick="togglePage(this)" data-target="' + pgId + '" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.8rem;background:#f8f8f8;border-bottom:1px solid #eee">' +
@@ -639,7 +639,7 @@ function renderDrawingResult(r, idx) {
       html += '</div></div>';
     });
   } else {
-    // Fallback: single-page or no per-page data â show overall detail table
+    // Fallback: single-page or no per-page data  - show overall detail table
     html += '<table class="detail-table">';
     if (d.materials && d.materials.length) {
       html += '<tr><th>Material callout(s)</th><td>' + d.materials.map(function(m) { return m.raw_callout; }).join(', ') + '</td></tr>';
