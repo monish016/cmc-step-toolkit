@@ -988,7 +988,7 @@ def classify_cluster(members):
 # ==========================================================================
 # 5. MAIN DRIVER â unified entry point
 # ==========================================================================
-def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json"):
+def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json", material="steel"):
     try:
         shape, solid = load_step(step_path)
     except ValueError as e:
@@ -1026,7 +1026,7 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
 
     try:
         if fab_type == "sheet_metal":
-            result.update(run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor))
+            result.update(run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor, material))
         else:
             result.update(run_machined(shape, solid, envelope, faces_list, planar, cyl, other, sub_type))
     except Exception as e:
@@ -1038,7 +1038,7 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json")
     return result
 
 
-def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
+def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor, material="steel"):
     """Sheet metal analysis path (original logic)."""
     thickness_mm, bend_radius_mm, bend_lines = detect_bend_faces(cyl)
 
@@ -1051,7 +1051,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
     # --- CMC K-factor lookup ---
     thickness_in = thickness_mm / 25.4
     bend_radius_in = (bend_radius_mm / 25.4) if bend_radius_mm else None
-    looked_up_k, matched_br, k_source = lookup_k_factor(thickness_in, bend_radius_in)
+    looked_up_k, matched_br, k_source = lookup_k_factor(thickness_in, bend_radius_in, material)
     k_factor = looked_up_k  # override default with table value
 
     axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
@@ -1194,7 +1194,8 @@ if __name__ == "__main__":
     ap.add_argument("step_file")
     ap.add_argument("--density", type=float, default=7.9, help="g/cm3, default 7.9 (stainless)")
     ap.add_argument("--k", type=float, default=0.44, help="bend-allowance K-factor")
+    ap.add_argument("--material", default="steel", help="steel or stainless (for K-factor table)")
     ap.add_argument("--out", default="geometry_extract.json")
     args = ap.parse_args()
-    res = run(args.step_file, args.density, args.k, args.out)
+    res = run(args.step_file, args.density, args.k, args.out, args.material)
     print(json.dumps(res, indent=2, default=str))
