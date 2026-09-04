@@ -434,7 +434,7 @@ function renderResults(results) {
     html += '<div class="view-grid">';
     const views = [["Isometric", r.files.view_iso], ["Top", r.files.view_top], ["Front", r.files.view_front], ["Flat Pattern", r.files.flat_pattern]];
     views.forEach(([label, url]) => {
-      if (url) html += '<div class="view-item"><img src="' + url + '" alt="' + label + '" onerror="this.parentElement.style.display=\\'none\\'"><div class="view-label">' + label + '</div></div>';
+      if (url) html += '<div class="view-item"><img src="' + url + '" alt="' + label + '" onerror="hideParent(this)"><div class="view-label">' + label + '</div></div>';
     });
     html += '</div>';
 
@@ -679,6 +679,8 @@ function toggleResult(idx) {
   body.classList.toggle("collapsed");
 }
 
+function hideParent(el) { el.parentElement.style.display = "none"; }
+
 function togglePage(el) {
   var target = el.getAttribute("data-target");
   document.getElementById(target).classList.toggle("collapsed");
@@ -712,16 +714,15 @@ function exportCSV(idx) {
     var fs = g.feature_summary || {};
     Object.keys(fs).forEach(function(k){rows.push(["Feature: "+k, fs[k]]);});
   }
-  if (g.features && g.features.length) {
-    var counts = {};
-    g.features.forEach(function(f){counts[f.type]=(counts[f.type]||0)+1;});
-    Object.keys(counts).forEach(function(k){rows.push(["Feature: "+k, counts[k]]);});
-  }
-  var csv = rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"';}).join(",");}).join("\n");
+  var NL = String.fromCharCode(10);
+  var csv = rows.map(function(row){return row.map(function(c){var s=String(c);return '"'+s.replace(/"/g,'""')+'"';}).join(",");}).join(NL);
   var blob = new Blob([csv], {type:"text/csv"});
   var a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = r.filename.replace(/\.[^.]+$/,"") + "_quote.csv";
+  var fn = r.filename;
+  var dot = fn.lastIndexOf(".");
+  if (dot > 0) fn = fn.substring(0, dot);
+  a.download = fn + "_quote.csv";
   a.click();
 }
 
@@ -729,9 +730,11 @@ function printQuote(idx) {
   var el = document.getElementById("result-" + idx);
   if (!el) return;
   var w = window.open("","_blank");
-  w.document.write('<html><head><title>CMC Quote Sheet</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#222;}h2{color:#2a5a2a;border-bottom:2px solid #2a5a2a;padding-bottom:8px;}table{border-collapse:collapse;width:100%;margin:10px 0;}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px;}th{background:#f0f0f0;}img{max-width:200px;max-height:150px;}.geo-grid{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0;}.geo-stat{border:1px solid #ddd;border-radius:6px;padding:8px 12px;min-width:100px;text-align:center;}.geo-stat .value{font-weight:bold;font-size:1.1em;}.geo-stat .label{color:#666;font-size:0.8em;}.dl-row,.view-grid{display:flex;flex-wrap:wrap;gap:8px;}.view-item{text-align:center;}.nesting-box{margin:10px 0;padding:10px;background:#f8f8f0;border:1px solid #ddd;border-radius:6px;}.nesting-box h4{margin:0 0 8px 0;color:#2a5a2a;}.dl-row{display:none;}@media print{.dl-row{display:none !important;}}</style></head><body>');
+  w.document.write('<html><head><title>CMC Quote Sheet</title>');
+  w.document.write('<style>body{font-family:Arial,sans-serif;padding:20px;color:#222}h2{color:#2a5a2a;border-bottom:2px solid #2a5a2a;padding-bottom:8px}table{border-collapse:collapse;width:100%;margin:10px 0}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}th{background:#f0f0f0}img{max-width:200px;max-height:150px}.geo-grid{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0}.geo-stat{border:1px solid #ddd;border-radius:6px;padding:8px 12px;min-width:100px;text-align:center}.geo-stat .value{font-weight:bold;font-size:1.1em}.geo-stat .label{color:#666;font-size:0.8em}.nesting-box{margin:10px 0;padding:10px;background:#f8f8f0;border:1px solid #ddd;border-radius:6px}.nesting-box h4{margin:0 0 8px;color:#2a5a2a}.dl-row{display:none}</style>');
+  w.document.write('</head><body>');
   w.document.write('<h2>CMC Quoting Toolkit - Quote Sheet</h2>');
-  w.document.write('<div style="color:#888;margin-bottom:12px;">Generated: ' + new Date().toLocaleString() + '</div>');
+  w.document.write('<div style="color:#888;margin-bottom:12px">Generated: ' + new Date().toLocaleString() + '</div>');
   w.document.write(el.innerHTML);
   w.document.write('</body></html>');
   w.document.close();
