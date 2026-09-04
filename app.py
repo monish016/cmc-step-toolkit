@@ -333,7 +333,8 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
   const density = materialSel.value === "custom"
     ? document.getElementById("customDensity").value
     : materialSel.value;
-  const kfactor = document.getElementById("kfactor").value;
+  const kfactorEl = document.getElementById("kfactor");
+  const kfactor = kfactorEl ? kfactorEl.value : "0.44";
 
   const allResults = [];
   const totalFiles = selectedFiles.length;
