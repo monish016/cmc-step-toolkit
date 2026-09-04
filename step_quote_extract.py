@@ -744,6 +744,10 @@ def build_flat_layout(chain, bend_radius_mm, thickness_mm, k_factor=0.44):
 # SHEET METAL FEATURE DETECTION
 # --------------------------------------------------------------------------
 def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
+    """
+    Find faces that are likely part of cut features (holes, slots, rectangles).
+    Filters out tiny edge blends and non-feature geometry.
+    """
     faces = shape.faces().vals()
     candidates = []
     for i, f in enumerate(faces):
@@ -755,20 +759,27 @@ def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
         ctr = f.Center()
         bb = f.BoundingBox()
         if st == GeomAbs_Plane and area < small_area_thresh:
+            # Skip very tiny planar faces (edge chamfers, micro-blends)
+            if area < 0.5:
+                continue
             candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
                                 "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area, "kind": "planar"})
         elif st == GeomAbs_Cylinder:
             cylg = surf.Cylinder()
             r = cylg.Radius()
+            sweep_deg = math.degrees(surf.LastUParameter() - surf.FirstUParameter())
             if r < 8:
+                # Skip very tiny cylindrical faces (micro edge blends)
+                if area < 0.3:
+                    continue
                 candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
                                     "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area,
-                                    "kind": f"cyl", "radius": r,
-                                    "u_sweep": math.degrees(surf.LastUParameter() - surf.FirstUParameter())})
+                                    "kind": "cyl", "radius": r,
+                                    "u_sweep": sweep_deg})
     return candidates
 
 
-def cluster_features(candidates, thresh=7.0):
+def cluster_features(candidates, thresh=12.0):
     n = len(candidates)
     parent = list(range(n))
     def find(a):
@@ -834,26 +845,96 @@ def merge_slot_pairs(clusters):
 
 
 def classify_cluster(members):
-    n_planar = sum(1 for m in members if m["kind"] == "planar")
+    """
+    Classify a cluster of faces as a feature type.
+
+    Key distinction: cylindrical faces with ~360Â° sweep = round holes,
+    cylindrical faces with small sweep (~90Â°) alongside planar faces = corner
+    fillets of a square/rectangular hole.
+    """
+    planars = [m for m in members if m["kind"] == "planar"]
     cyls = [m for m in members if m["kind"] == "cyl"]
+    n_planar = len(planars)
+    n_cyl = len(cyls)
+
     xs = [m["center"][0] for m in members]
     ys = [m["center"][1] for m in members]
     zs = [m["center"][2] for m in members]
     cx, cy, cz = sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs)
     spread = (max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs))
+
     if cyls:
+        # Separate full-circle cylinders (round holes) from partial arcs (corner fillets)
+        full_circle_cyls = [c for c in cyls if c["u_sweep"] > 300]
+        partial_cyls = [c for c in cyls if c["u_sweep"] <= 300]
+
+        # Case 1: Full-circle cylinders with no/few planars = ROUND hole
+        if full_circle_cyls and n_planar <= 1:
+            radii = [c["radius"] for c in full_circle_cyls]
+            r_avg = sum(radii) / len(radii)
+            if r_avg * 2 / 25.4 < 0.08:
+                return None
+            dia_in = 2 * r_avg / 25.4
+            return {"type": "round",
+                    "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+
+        # Case 2: Only partial arcs (corner fillets) + planar faces = SQUARE/RECT hole
+        if partial_cyls and n_planar >= 2:
+            # Use the spread of ALL member faces to determine the rectangle size
+            xl, yl, zl = spread
+            # Pick the two largest spread dimensions as the hole size
+            dims = sorted([xl, yl, zl], reverse=True)
+            d1, d2 = dims[0], dims[1]
+            if d1 < 1.5 or d2 < 1.5:
+                return None
+            return {"type": "square_or_rect",
+                    "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
+                    "center": (cx, cy, cz), "confidence": "high"}
+
+        # Case 3: Partial arcs without enough planars â likely corner fillets
+        # that didn't cluster with their planar walls. Check if they form
+        # a rectangular pattern (4 corners at ~90Â° each)
+        if partial_cyls and len(partial_cyls) >= 4 and n_planar == 0:
+            avg_sweep = sum(c["u_sweep"] for c in partial_cyls) / len(partial_cyls)
+            if 70 < avg_sweep < 110:  # ~90Â° corner fillets
+                xl, yl, zl = spread
+                dims = sorted([xl, yl, zl], reverse=True)
+                d1, d2 = dims[0], dims[1]
+                if d1 >= 1.5 and d2 >= 1.5:
+                    return {"type": "square_or_rect",
+                            "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
+                            "center": (cx, cy, cz), "confidence": "medium"}
+
+        # Case 4: Mixed or ambiguous â fall back to checking if it's round
+        if full_circle_cyls:
+            radii = [c["radius"] for c in full_circle_cyls]
+            r_avg = sum(radii) / len(radii)
+            if r_avg * 2 / 25.4 < 0.08:
+                return None
+            dia_in = 2 * r_avg / 25.4
+            return {"type": "round",
+                    "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "medium"}
+
+        # Partial cyls only, few of them â likely edge fillets, not a feature
+        if len(partial_cyls) <= 2 and n_planar == 0:
+            return None
+
+        # Last resort: use spread
         radii = [c["radius"] for c in cyls]
         r_avg = sum(radii) / len(radii)
         if r_avg * 2 / 25.4 < 0.08:
             return None
         dia_in = 2 * r_avg / 25.4
         return {"type": "round",
-                "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+                "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "low"}
     else:
-        xl, yl = spread[0], spread[1]
-        if xl < 2.0 or yl < 2.0:
+        # Planar-only cluster
+        xl, yl, zl = spread
+        dims = sorted([xl, yl, zl], reverse=True)
+        d1, d2 = dims[0], dims[1]
+        if d1 < 1.5 or d2 < 1.5:
             return None
-        return {"type": "square_or_rect", "size_in": (round(xl/25.4,3), round(yl/25.4,3)),
+        return {"type": "square_or_rect", "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                 "center": (cx, cy, cz), "confidence": "high"}
 
 
