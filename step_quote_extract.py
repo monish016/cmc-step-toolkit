@@ -1055,6 +1055,8 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
         return sum(p3d[k]*axis_dir[k] for k in range(3))
 
     ref_proj = min(project_point_to_axis(c) for c in corners)
+    max_proj = max(project_point_to_axis(c) for c in corners)
+    flat_length_mm = max_proj - ref_proj
 
     bend_face_idxs = set()
     for b in bend_lines:
@@ -1081,6 +1083,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other, k_factor):
         "bend_angles_deg": sorted([round(b["angle_deg"],1) for b in bend_lines]),
         "k_factor_assumed": k_factor,
         "flat_width_in": round(flat_width_mm/25.4, 3),
+        "flat_length_in": round(flat_length_mm/25.4, 3),
         "layout_segments": [
             {"kind": s["kind"], "start_in": round(s["start"]/25.4,3), "end_in": round(s["end"]/25.4,3),
              **({"angle_deg": s["angle_deg"]} if s["kind"]=="bend" else {})}
