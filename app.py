@@ -461,6 +461,12 @@ function renderSheetMetal(g, env, dims) {
     '<tr><th>Mass (metric)</th><td>' + env.mass_kg.toFixed(3) + ' kg</td></tr>' +
     '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm3</td></tr>' +
     '<tr><th>Surface area</th><td>' + env.area_mm2.toFixed(1) + ' mm2</td></tr>' +
+    '<tr><th>Feature breakdown</th><td>' + (function() {
+      if (!g.features || !g.features.length) return 'None';
+      var counts = {};
+      g.features.forEach(function(f) { counts[f.type] = (counts[f.type] || 0) + 1; });
+      return Object.keys(counts).map(function(k) { return counts[k] + ' ' + k; }).join(', ');
+    })() + '</td></tr>' +
     '<tr><th>Unclassified features</th><td>' + (g.features_unclassified_count || 0) + '</td></tr>' +
     '</table>';
   return html;
