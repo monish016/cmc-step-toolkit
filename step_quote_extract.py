@@ -946,7 +946,18 @@ def cluster_features(candidates, thresh=12.0):
     for i in range(n):
         for j in range(i + 1, n):
             d = math.dist(candidates[i]["center"], candidates[j]["center"])
-            if d < thresh:
+            # For two cylindrical faces with matching radii (split-circle halves),
+            # allow larger clustering distance proportional to the radius.
+            # This catches large holes split into 2x180-deg halves whose face
+            # centers are ~(4/pi)*r apart -- much farther than 12mm for big holes.
+            eff_thresh = thresh
+            ci, cj = candidates[i], candidates[j]
+            if ci["kind"] == "cyl" and cj["kind"] == "cyl":
+                r_spread = abs(ci["radius"] - cj["radius"])
+                if r_spread < 1.0:
+                    max_r = max(ci["radius"], cj["radius"])
+                    eff_thresh = max(thresh, 2 * max_r + 5)
+            if d < eff_thresh:
                 union(i, j)
     groups = defaultdict(list)
     for i in range(n):
@@ -1346,7 +1357,8 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             tproj = v[0]*d[0] + v[1]*d[1]
             perp = abs(v[0]*d[1] - v[1]*d[0])
             seglen = seg["end"] - seg["start"]
-            if -3 <= tproj <= seglen+3 and perp < 3.0:
+            perp_tol = max(thickness_mm, 3.0) + 1.0
+            if -3 <= tproj <= seglen+3 and perp < perp_tol:
                 cand = seg["start"] + max(0, min(seglen, tproj))
                 if best is None or perp < best[1]:
                     best = (cand, perp)
