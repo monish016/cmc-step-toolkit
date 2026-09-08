@@ -458,6 +458,128 @@ def find_finishes(text):
     return unique
 
 
+def find_features(text):
+    """Extract hole/feature callouts like '4X .28 THRU', 'dia 1.27 THRU', etc."""
+    features = []
+
+    # Diameter symbol variants: â (U+2205), Ã (U+00D8), â (U+2300)
+    DIA = r'[âÃâ]'
+
+    # ââ Round holes: [NX] [â] .DDD [THRU | DP depth] ââ
+    hole_re = re.compile(
+        r'(?:(\d+)\s*[Xx]\s+)?'               # optional count  "4X "
+        r'(?:' + DIA + r'\s*)?'                # optional â
+        r'(\d*\.\d+|\d+\.\d*)'                # diameter
+        r'\s*(?:"|IN)?\s*'                     # optional units
+        r'(THRU(?:\s*ALL)?'                    # through
+        r'|[Xx\xd7]\s*\.?\d+\.?\d*\s*(?:DP|DEEP)'  # blind
+        r'|DP\s*\.?\d+\.?\d*)',                # depth
+        re.IGNORECASE
+    )
+
+    for m in hole_re.finditer(text):
+        try:
+            dia = float(m.group(2))
+        except (ValueError, TypeError):
+            continue
+        if dia < 0.01 or dia > 10.0:
+            continue
+        count = int(m.group(1)) if m.group(1) else 1
+        is_thru = 'THRU' in (m.group(3) or '').upper()
+
+        feat = {
+            "type": "round_hole",
+            "count": count,
+            "diameter_in": round(dia, 4),
+            "through": is_thru,
+            "raw": m.group(0).strip(),
+        }
+
+        # Look ahead for CBORE / CSINK
+        after = text[m.end():m.end()+100]
+        cb = re.match(
+            r'\s*(?:CBORE|C\'?BORE)\s*(?:' + DIA + r')?\s*(\d*\.?\d+)'
+            r'(?:\s*[Xx\xd7]\s*(\d*\.?\d+))?', after, re.IGNORECASE)
+        if cb:
+            feat["type"] = "counterbored_hole"
+            feat["cbore_dia_in"] = round(float(cb.group(1)), 4)
+            if cb.group(2):
+                feat["cbore_depth_in"] = round(float(cb.group(2)), 4)
+            feat["raw"] += " " + cb.group(0).strip()
+
+        cs = re.match(
+            r'\s*(?:CSINK|C\'?SINK)\s*(?:' + DIA + r')?\s*(\d*\.?\d+)'
+            r'(?:\s*[Xx\xd7]\s*(\d+)\s*[\xb0]?)?', after, re.IGNORECASE)
+        if cs and not cb:
+            feat["type"] = "countersunk_hole"
+            feat["csink_dia_in"] = round(float(cs.group(1)), 4)
+            if cs.group(2):
+                feat["csink_angle_deg"] = int(cs.group(2))
+            feat["raw"] += " " + cs.group(0).strip()
+
+        features.append(feat)
+
+    # ââ Tapped holes: [NX] thread-pitch [UNC|UNF] [THRU|DP] ââ
+    tap_re = re.compile(
+        r'(?:(\d+)\s*[Xx]\s+)?'
+        r'(#?\d+\s*[-/]\s*\d+|'              # imperial: #10-32, 1/4-20
+        r'M\d+(?:\.\d+)?(?:\s*[Xx\xd7]\s*\d+\.?\d*)?)'  # metric: M6x1.0
+        r'\s*(?:UNC|UNF|UNJC|UNJF|TAP)?\s*'
+        r'(THRU|TAP|DP\s*\.?\d+\.?\d*)?',
+        re.IGNORECASE
+    )
+    for m in tap_re.finditer(text):
+        thread = (m.group(2) or '').strip()
+        if not re.match(r'#?\d+\s*[-/]\s*\d+|M\d+', thread):
+            continue
+        count = int(m.group(1)) if m.group(1) else 1
+        depth_str = m.group(3) or ''
+
+        feat = {
+            "type": "tapped_hole",
+            "count": count,
+            "thread_spec": thread,
+            "through": 'THRU' in depth_str.upper(),
+            "raw": m.group(0).strip(),
+        }
+        features.append(feat)
+
+    # ââ Slots: W x L [THRU] or SLOT W x L ââ
+    slot_re = re.compile(
+        r'(?:(\d+)\s*[Xx]\s+)?'
+        r'(?:SLOT\s+)?'
+        r'(\d*\.\d+)\s*[Xx\xd7]\s*(\d*\.\d+)'
+        r'\s*(?:SLOT|THRU)',
+        re.IGNORECASE
+    )
+    for m in slot_re.finditer(text):
+        try:
+            w = float(m.group(2))
+            l = float(m.group(3))
+        except (ValueError, TypeError):
+            continue
+        if w < 0.01 or l < 0.01 or w > 20 or l > 20:
+            continue
+        count = int(m.group(1)) if m.group(1) else 1
+        features.append({
+            "type": "slot",
+            "count": count,
+            "width_in": round(min(w, l), 4),
+            "length_in": round(max(w, l), 4),
+            "raw": m.group(0).strip(),
+        })
+
+    # Deduplicate by raw callout
+    seen = set()
+    unique = []
+    for f in features:
+        key = f["raw"].upper().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    return unique
+
+
 def identify_missing_info(result):
     """Flag what's missing that Sales would need to ask about."""
     missing = []
@@ -509,6 +631,7 @@ def _analyze_single_page(page_text, page_num):
         "bends": find_bends(page_text),
         "finishes": find_finishes(page_text),
         "part_info": find_part_info(page_text),
+        "features": find_features(page_text),
     }
 
     result["missing_info"] = identify_missing_info(result)
@@ -550,6 +673,9 @@ def _analyze_single_page(page_text, page_num):
         summary_parts.append(f"Size: {dim_str}")
     if result["part_info"].get("quantity"):
         summary_parts.append(f"Qty: {result['part_info']['quantity']}")
+    if result["features"]:
+        total_feat = sum(f.get("count", 1) for f in result["features"])
+        summary_parts.append(f"Features: {total_feat}")
 
     result["summary"] = " | ".join(summary_parts) if summary_parts else "Drawing page (limited data)"
 
@@ -608,6 +734,7 @@ def analyze_drawing(pdf_path):
         "bends": find_bends(full_text),
         "finishes": find_finishes(full_text),
         "part_info": find_part_info(full_text),
+        "features": find_features(full_text),
     }
     overall["missing_info"] = identify_missing_info(overall)
 
