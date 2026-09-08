@@ -987,6 +987,9 @@ def merge_slot_pairs(clusters):
                 continue
             d = math.dist(a["center"], b["center"])
             if 2*a["r"] < d < 200.0:
+                # Skip if both are full circles (standalone holes, not slot end caps)
+                if a.get("avg_sweep", 360) > 300 and b.get("avg_sweep", 360) > 300:
+                    continue
                 diffs = sorted(abs(a["center"][k]-b["center"][k]) for k in range(3))
                 if diffs[0] < 1.0 and diffs[1] < 3.0:
                     a["used"] = b["used"] = True
