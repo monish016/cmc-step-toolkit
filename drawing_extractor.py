@@ -298,7 +298,7 @@ def find_thickness(text):
     """Extract sheet thickness from drawing."""
     results = []
 
-    # Decimal thickness
+    # Decimal thickness with explicit THK/THICK keyword
     for m in PATTERNS["thickness_decimal"].finditer(text):
         val = m.group(1) or m.group(2)
         if val:
@@ -323,6 +323,35 @@ def find_thickness(text):
                     })
             except ValueError:
                 pass
+
+    # Contextual thickness: if drawing has bends but no explicit thickness yet,
+    # look for standalone dimensions matching standard sheet metal gauges.
+    # Common standard thicknesses in inches:
+    if not results:
+        text_upper = text.upper()
+        has_bends = bool(re.search(r'BEND\s*(?:RADIUS|RAD|R\.?)|MIN\.?\s*BEND|BRAKE|FORMED|FORM\b', text_upper))
+        if has_bends:
+            std_thicknesses = {
+                0.018, 0.024, 0.030, 0.036, 0.048, 0.060, 0.075, 0.090,
+                0.105, 0.120, 0.125, 0.135, 0.156, 0.187, 0.190, 0.250,
+                0.312, 0.375, 0.500,
+            }
+            # Match standalone decimal dimensions (not part of larger expressions)
+            dim_re = re.compile(r'(?<![x\d])\.?(\d*\.\d{2,4})(?!\s*[xX\xd7])')
+            for m in dim_re.finditer(text):
+                try:
+                    v = float(m.group(1))
+                    # Check if it matches a standard thickness (within 0.002" tolerance)
+                    for std in std_thicknesses:
+                        if abs(v - std) < 0.002:
+                            results.append({
+                                "value_in": round(std, 4),
+                                "gauge": None,
+                                "raw": m.group(0).strip() + " (inferred from dimension)"
+                            })
+                            break
+                except ValueError:
+                    pass
 
     # Deduplicate
     seen = set()
@@ -520,20 +549,47 @@ def find_features(text):
         features.append(feat)
 
     # ââ Tapped holes: [NX] thread-pitch [UNC|UNF] [THRU|DP] ââ
+    # Strict patterns to avoid matching part numbers, dates, material grades
     tap_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'
-        r'(#?\d+\s*[-/]\s*\d+|'              # imperial: #10-32, 1/4-20
-        r'M\d+(?:\.\d+)?(?:\s*[Xx\xd7]\s*\d+\.?\d*)?)'  # metric: M6x1.0
-        r'\s*(?:UNC|UNF|UNJC|UNJF|TAP)?\s*'
+        r'('
+        r'#\d{1,2}\s*-\s*\d{1,3}'             # numbered: #4-40, #10-32
+        r'|\d{1,2}/\d{1,2}\s*-\s*\d{1,3}'     # fractional: 1/4-20, 3/8-16
+        r'|M\d{1,3}(?:\.\d+)?(?:\s*[Xx\xd7]\s*\d+\.?\d*)?'  # metric: M6x1.0
+        r')'
+        r'\s*(UNC|UNF|UNJC|UNJF|TAP)?\s*'
         r'(THRU|TAP|DP\s*\.?\d+\.?\d*)?',
         re.IGNORECASE
     )
     for m in tap_re.finditer(text):
         thread = (m.group(2) or '').strip()
-        if not re.match(r'#?\d+\s*[-/]\s*\d+|M\d+', thread):
+        qualifier = m.group(3) or m.group(4) or ''
+
+        # For fractional threads like 1/4-20: validate it's a real tap size
+        frac_match = re.match(r'(\d+)/(\d+)\s*-\s*(\d+)', thread)
+        if frac_match:
+            num, den, tpi = int(frac_match.group(1)), int(frac_match.group(2)), int(frac_match.group(3))
+            # Numerator must be < denominator (valid fraction), denominator in standard sizes
+            if num >= den or den not in (2, 4, 8, 16, 32, 64) or tpi < 4 or tpi > 80:
+                continue
+        elif thread.startswith('#'):
+            # Numbered thread: #0-80 through #12-24
+            nm = re.match(r'#(\d+)\s*-\s*(\d+)', thread)
+            if nm:
+                num_size, tpi = int(nm.group(1)), int(nm.group(2))
+                if num_size > 14 or tpi < 4 or tpi > 100:
+                    continue
+        elif not thread.upper().startswith('M'):
+            # Plain digit-dash-digit without # or M: skip (too ambiguous -- matches part numbers, dates)
             continue
+
+        # Require at least a thread class qualifier or depth qualifier to reduce false positives
+        # Exception: # and M prefixed specs are unambiguous enough on their own
+        if not thread.startswith('#') and not thread.upper().startswith('M') and not qualifier.strip():
+            continue
+
         count = int(m.group(1)) if m.group(1) else 1
-        depth_str = m.group(3) or ''
+        depth_str = m.group(4) or ''
 
         feat = {
             "type": "tapped_hole",
