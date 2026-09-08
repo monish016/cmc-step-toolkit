@@ -963,11 +963,12 @@ def merge_slot_pairs(clusters):
         if cyls and not planars and len(m) <= 2:
             r = sum(c["radius"] for c in cyls) / len(cyls)
             avg_sweep = sum(c.get("u_sweep", 360) for c in cyls) / len(cyls)
+            total_sweep = sum(c.get("u_sweep", 360) for c in cyls)
             cx = sum(c["center"][0] for c in cyls) / len(cyls)
             cy = sum(c["center"][1] for c in cyls) / len(cyls)
             cz = sum(c["center"][2] for c in cyls) / len(cyls)
             cyl_only.append({"r": r, "center": (cx, cy, cz), "used": False, "orig": m,
-                                 "avg_sweep": avg_sweep})
+                                 "avg_sweep": avg_sweep, "total_sweep": total_sweep})
         else:
             remaining.append(m)
     slots = []
@@ -988,7 +989,7 @@ def merge_slot_pairs(clusters):
             d = math.dist(a["center"], b["center"])
             if 2*a["r"] < d < 200.0:
                 # Skip if both are full circles (standalone holes, not slot end caps)
-                if a.get("avg_sweep", 360) > 300 and b.get("avg_sweep", 360) > 300:
+                if a.get("total_sweep", 360) > 300 and b.get("total_sweep", 360) > 300:
                     continue
                 diffs = sorted(abs(a["center"][k]-b["center"][k]) for k in range(3))
                 if diffs[0] < 1.0 and diffs[1] < 3.0:
