@@ -1041,6 +1041,23 @@ def classify_cluster(members):
             return {"type": "round",
                     "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
 
+        # Case 1b: Partial cyls that are large arcs (>=140 deg, i.e. semicircles)
+        # forming a full circle, even when mixed with planar faces.
+        # Corner fillets are ~90 deg and won't pass the >=140 filter.
+        if partial_cyls and len(partial_cyls) >= 2:
+            large_arcs = [c for c in partial_cyls if c["u_sweep"] >= 140]
+            if len(large_arcs) >= 2:
+                total_sweep_la = sum(c["u_sweep"] for c in large_arcs)
+                radii_la = [c["radius"] for c in large_arcs]
+                r_spread_la = max(radii_la) - min(radii_la)
+                if total_sweep_la > 300 and r_spread_la < 0.5:
+                    r_avg = sum(radii_la) / len(radii_la)
+                    if r_avg * 2 / 25.4 >= 0.08:
+                        dia_in = 2 * r_avg / 25.4
+                        return {"type": "round",
+                                "diameter_in": round(dia_in, 3),
+                                "center": (cx, cy, cz), "confidence": "high"}
+
         # Case 2: Only partial arcs (corner fillets) + planar faces = SQUARE/RECT hole
         if partial_cyls and n_planar >= 2:
             # Use the spread of ALL member faces to determine the rectangle size
