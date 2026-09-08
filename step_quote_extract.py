@@ -1282,17 +1282,43 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
 
     axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
     bb = envelope["bbox_mm"]
-    cut_point = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
+    center = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
 
-    try:
-        edges = cut_cross_section(solid, axis_dir, cut_point)
-        edges_info = [edge_2d_info(e, axis_dir) for e in edges]
-        chain = walk_closed_loop(edges_info, thickness_mm)
-        layout, flat_width_mm = build_flat_layout(
-            chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
-    except Exception as e:
-        print(f"Warning: Cross-section / flat layout failed: {e}")
-        layout, flat_width_mm = [], 0.0
+    # Multi-cut: try several cross-section positions along the bend axis
+    # to avoid cutting through holes/slots which fragment the profile.
+    def _proj_axis(pt):
+        return sum(pt[k]*axis_dir[k] for k in range(3))
+
+    proj_center = _proj_axis(center)
+    corners_bb = [(bb["xmin"] if i&1 else bb["xmax"],
+                   bb["ymin"] if i&2 else bb["ymax"],
+                   bb["zmin"] if i&4 else bb["zmax"]) for i in range(8)]
+    proj_min_bb = min(_proj_axis(c) for c in corners_bb)
+    proj_max_bb = max(_proj_axis(c) for c in corners_bb)
+    axis_span = proj_max_bb - proj_min_bb
+
+    best_layout, best_flat_width_mm = [], 0.0
+    best_cut_point = center
+    for frac in [0.05, 0.15, 0.25, 0.5, 0.75, 0.85, 0.95]:
+        offset = proj_min_bb + frac * axis_span - proj_center
+        cp = tuple(center[k] + offset * axis_dir[k] for k in range(3))
+        try:
+            edges = cut_cross_section(solid, axis_dir, cp)
+            edges_info = [edge_2d_info(e, axis_dir) for e in edges]
+            chain = walk_closed_loop(edges_info, thickness_mm)
+            layout_candidate, fw = build_flat_layout(
+                chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
+            if fw > best_flat_width_mm:
+                best_flat_width_mm = fw
+                best_layout = layout_candidate
+                best_cut_point = cp
+        except Exception:
+            pass
+
+    layout, flat_width_mm = best_layout, best_flat_width_mm
+    cut_point = best_cut_point
+    if flat_width_mm == 0.0:
+        print("Warning: All cross-section cuts failed for flat layout")
 
     def norm2(v):
         m = math.hypot(*v)
