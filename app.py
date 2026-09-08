@@ -730,6 +730,30 @@ function renderDrawingResult(r, idx) {
       }
       html += '</table>';
 
+
+      // Per-page features table
+      if (pg.features && pg.features.length) {
+        html += '<h5 style="margin:0.6rem 0 0.3rem;color:#0066aa;font-size:0.8rem">Extracted Features (from drawing callouts)</h5>';
+        html += '<table class="detail-table" style="font-size:0.8rem"><tr><th>Type</th><th>Count</th><th>Size</th><th>Callout</th></tr>';
+        pg.features.forEach(function(f) {
+          var size = '';
+          if (f.type === 'round_hole' || f.type === 'counterbored_hole' || f.type === 'countersunk_hole') {
+            size = 'Dia ' + f.diameter_in + '"';
+            if (f.cbore_dia_in) size += ' CBORE ' + f.cbore_dia_in + '"';
+            if (f.csink_dia_in) size += ' CSINK ' + f.csink_dia_in + '"';
+            if (f.through) size += ' THRU';
+          } else if (f.type === 'tapped_hole') {
+            size = f.thread_spec;
+            if (f.through) size += ' THRU';
+          } else if (f.type === 'slot') {
+            size = f.width_in + '" x ' + f.length_in + '"';
+          }
+          var label = f.type.replace(/_/g, ' ');
+          html += '<tr><td>' + label + '</td><td>' + (f.count || 1) + '</td><td>' + size + '</td><td style="color:#666;font-size:0.75rem">' + (f.raw || '') + '</td></tr>';
+        });
+        html += '</table>';
+      }
+
       // Per-page missing info
       if (pg.missing_info && pg.missing_info.length) {
         html += '<div style="margin-top:0.4rem">';
@@ -993,6 +1017,47 @@ def _generate_drawing_page_report(page_data, output_path, source_filename):
             ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ]))
         story.append(tbl)
+        story.append(Spacer(1, 12))
+
+
+    # Features table
+    feats = page_data.get("features", [])
+    if feats:
+        story.append(Paragraph("Extracted Features (from drawing callouts)", subtitle_style))
+        feat_rows = [["Type", "Count", "Size", "Callout"]]
+        for ft in feats:
+            ftype = ft.get("type", "").replace("_", " ")
+            count = str(ft.get("count", 1))
+            if ft["type"] in ("round_hole", "counterbored_hole", "countersunk_hole"):
+                size = f'Dia {ft.get("diameter_in", "?")}"'
+                if ft.get("cbore_dia_in"):
+                    size += f' CBORE {ft["cbore_dia_in"]}"'
+                if ft.get("csink_dia_in"):
+                    size += f' CSINK {ft["csink_dia_in"]}"'
+                if ft.get("through"):
+                    size += " THRU"
+            elif ft["type"] == "tapped_hole":
+                size = ft.get("thread_spec", "?")
+                if ft.get("through"):
+                    size += " THRU"
+            elif ft["type"] == "slot":
+                size = f'{ft.get("width_in", "?")}" x {ft.get("length_in", "?")}"'
+            else:
+                size = ft.get("raw", "")
+            feat_rows.append([ftype, count, size, ft.get("raw", "")])
+        feat_col_widths = [1.2 * inch, 0.6 * inch, 2.5 * inch, 2.5 * inch]
+        feat_tbl = Table(feat_rows, colWidths=feat_col_widths)
+        feat_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0066aa")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f6ff")]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(feat_tbl)
         story.append(Spacer(1, 12))
 
     # Missing info
