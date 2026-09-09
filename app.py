@@ -1538,14 +1538,14 @@ def analyze():
     except (ValueError, TypeError):
         density, k_factor, material = 7.9, 0.44, "steel"
 
-        # Quantity for cost estimation
-        try:
-            quantity = max(1, int(request.form.get("quantity", "1")))
-        except (ValueError, TypeError):
-            quantity = 1
+    # Quantity for cost estimation
+    try:
+        quantity = max(1, int(request.form.get("quantity", "1")))
+    except (ValueError, TypeError):
+        quantity = 1
 
-        # Material name for cost engine
-        material_name = DENSITY_TO_MATERIAL.get(raw_density, "Mild/Carbon Steel")
+    # Material name for cost engine
+    material_name = DENSITY_TO_MATERIAL.get(raw_density, "Mild/Carbon Steel")
 
     # create job directory
     job_id = str(uuid.uuid4())[:12]
@@ -1712,13 +1712,13 @@ def analyze():
     except (json.JSONDecodeError, FileNotFoundError) as e:
         return jsonify({"error": f"Failed to read analysis results: {e}"}), 500
 
-        # -- Cost estimation --
-        cost_estimate = None
-        try:
-            cost_geo = _build_cost_geometry(geometry)
-            cost_estimate = cost_engine.estimate_cost(cost_geo, material_name, quantity)
-        except Exception as ce:
-            print(f"Warning: Cost estimation failed (non-fatal): {ce}")
+    # -- Cost estimation --
+    cost_estimate = None
+    try:
+        cost_geo = _build_cost_geometry(geometry)
+        cost_estimate = cost_engine.estimate_cost(cost_geo, material_name, quantity)
+    except Exception as ce:
+        print(f"Warning: Cost estimation failed (non-fatal): {ce}")
 
     # build file URLs
     base = f"/files/{job_id}"
@@ -1756,9 +1756,9 @@ def analyze():
         print(f"Warning: Failed to save job to DB: {db_err}")
 
     resp = {"geometry": geometry, "files": files, "job_id": job_id}
-        if cost_estimate:
-            resp["cost_estimate"] = cost_estimate
-        return jsonify(resp)
+    if cost_estimate:
+        resp["cost_estimate"] = cost_estimate
+    return jsonify(resp)
 
 
 @app.route("/history")
