@@ -16,6 +16,7 @@ import sqlite3
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_file, jsonify, url_for
 from werkzeug.utils import secure_filename
+import cost_engine
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
@@ -93,6 +94,76 @@ _init_db()
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1] in ALLOWED_EXTENSIONS
 
+
+
+# -- Density-to-material name mapping for cost engine ----------------
+DENSITY_TO_MATERIAL = {
+    "7.9":      "Stainless Steel (SUS304)",
+    "7.85":     "Mild/Carbon Steel",
+    "7.85_galv": "Galvanized Steel",
+    "2.71":     "Aluminum 6061",
+    "2.68":     "Aluminum 5052",
+    "8.96":     "Copper (C110)",
+    "8.53":     "Brass (C260)",
+}
+
+
+def _build_cost_geometry(geometry):
+    """Convert STEP extraction JSON into the dict that cost_engine.estimate_cost() expects."""
+    fab_type = geometry.get("fab_type", "sheet_metal")
+    env = geometry.get("envelope", {})
+    bbox = env.get("bbox_mm", {})
+
+    # Dimensions in inches
+    x_in = bbox.get("xlen", 0) / 25.4
+    y_in = bbox.get("ylen", 0) / 25.4
+    z_in = bbox.get("zlen", 0) / 25.4
+
+    thickness = geometry.get("thickness_in", 0.0) or 0.0
+    flat_w = float(geometry.get("flat_width_in", 0) or 0)
+    flat_l = float(geometry.get("flat_length_in", 0) or 0)
+    features = geometry.get("features", [])
+
+    # Count holes
+    hole_count = sum(1 for f in features if f.get("type") in ("round", "countersink"))
+
+    # Estimate cut perimeter from flat pattern + features
+    outer_perim = 2 * (flat_w + flat_l) if flat_w > 0 and flat_l > 0 else 2 * (x_in + y_in)
+    feature_perim = 0.0
+    for f in features:
+        ftype = f.get("type", "")
+        if ftype == "round":
+            dia = f.get("diameter_in", 0) or 0
+            feature_perim += math.pi * dia
+        elif ftype == "square_or_rect":
+            sz = f.get("size_in", [0, 0])
+            feature_perim += 2 * (sz[0] + sz[1])
+        elif ftype == "slot":
+            sw = f.get("width_in", 0) or 0
+            sl = f.get("slot_length_in", 0) or 0
+            feature_perim += 2 * sl + math.pi * sw
+    cut_perim = outer_perim + feature_perim
+
+    # Volume in in^3
+    vol_in3 = env.get("volume_mm3", 0) / 16387.064
+
+    # Fab type label
+    fab_label = "Sheet Metal" if fab_type == "sheet_metal" else "Machined"
+
+    return {
+        "fab_type": fab_label,
+        "thickness_in": thickness,
+        "dims": {"length": x_in, "width": y_in, "height": z_in},
+        "bend_count": geometry.get("num_bends", 0) or 0,
+        "cut_perimeter_in": round(cut_perim, 2),
+        "flat_width_in": flat_w,
+        "flat_length_in": flat_l,
+        "weight_lb": env.get("mass_lb", 0) or 0,
+        "hole_count": hole_count,
+        "volume_in3": vol_in3,
+        "machining_type": geometry.get("machining_type", None),
+        "material_removal_ratio": geometry.get("material_removal_ratio", 0),
+    }
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -231,6 +302,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <input type="number" id="customDensity" name="custom_density" value="7.9" step="0.01" min="0.5" max="25">
           </div>
         </div>
+          <div class="param-group">
+            <label for="quantity">Quantity</label>
+            <input type="number" id="quantity" name="quantity" value="1" min="1" max="100000" step="1">
+          </div>
         <button type="submit" class="btn" id="submitBtn" disabled>Analyze files</button>
       </form>
       <div class="progress" id="progress">
@@ -259,7 +334,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.0</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.1</div>
 
 <script>
 // --- Tab switching ---
@@ -392,6 +467,7 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
     form.append("step_file", f);
     form.append("density", density);
     form.append("k_factor", kfactor);
+    form.append("quantity", document.getElementById("quantity").value || "1");
 
     try {
       const resp = await fetch("/analyze", { method: "POST", body: form });
@@ -480,6 +556,12 @@ function renderResults(results) {
     // Processes
     if (g.processes && g.processes.length) {
       html += '<table class="detail-table"><tr><th>Identified processes</th><td>' + g.processes.join(', ') + '</td></tr></table>';
+    }
+
+    
+    // Cost Estimate
+    if (r.cost_estimate) {
+      html += renderCostEstimate(r.cost_estimate);
     }
 
     // Views
@@ -627,6 +709,65 @@ function renderMachined(g, env, dims) {
     '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm3</td></tr>' +
     '<tr><th>Surface area</th><td>' + env.area_mm2.toFixed(1) + ' mm2</td></tr>' +
     '</table>';
+  return html;
+}
+
+function renderCostEstimate(cost) {
+  if (!cost) return '';
+  var html = '<div class="cost-section" style="margin:1rem 0;border:2px solid #2a5a2a;border-radius:8px;overflow:hidden">';
+  html += '<div style="background:#2a5a2a;color:#fff;padding:0.6rem 1rem;font-weight:700;font-size:1rem">Cost Estimate <span style="opacity:0.7;font-weight:400;font-size:0.85rem">(' + cost.material_display + ', Qty ' + cost.quantity + ')</span></div>';
+
+  // Summary row
+  html += '<div style="display:flex;gap:0;border-bottom:1px solid #ddd">';
+  html += '<div style="flex:1;padding:0.8rem 1rem;text-align:center;border-right:1px solid #ddd"><div style="font-size:1.6rem;font-weight:700;color:#2a5a2a">$' + cost.unit_cost.toFixed(2) + '</div><div style="font-size:0.75rem;color:#666">Per Part</div></div>';
+  html += '<div style="flex:1;padding:0.8rem 1rem;text-align:center;border-right:1px solid #ddd"><div style="font-size:1.6rem;font-weight:700;color:#1a3a1a">$' + cost.total_cost.toFixed(2) + '</div><div style="font-size:0.75rem;color:#666">Total (' + cost.quantity + ' pcs)</div></div>';
+  html += '<div style="flex:1;padding:0.8rem 1rem;text-align:center"><div style="font-size:1.1rem;font-weight:600;color:#555">' + cost.total_time_hr.toFixed(2) + ' hr</div><div style="font-size:0.75rem;color:#666">Total Shop Time</div></div>';
+  html += '</div>';
+
+  // Operations breakdown
+  if (cost.operations && cost.operations.length) {
+    html += '<table class="detail-table" style="margin:0;border-radius:0;font-size:0.82rem">';
+    html += '<thead><tr style="background:#f0f5f0"><th>Operation</th><th>Setup</th><th>Cycle</th><th>Run Time</th><th>Rate</th><th>Cost</th></tr></thead><tbody>';
+    cost.operations.forEach(function(op) {
+      html += '<tr>';
+      html += '<td style="font-weight:600">' + op.operation + '</td>';
+      html += '<td>' + op.setup_hr.toFixed(2) + ' hr</td>';
+      html += '<td>' + op.cycle_time_hr.toFixed(4) + ' hr</td>';
+      html += '<td>' + op.run_time_hr.toFixed(2) + ' hr</td>';
+      html += '<td>$' + op.rate_per_hr.toFixed(0) + '/hr</td>';
+      html += '<td style="font-weight:600">$' + op.total_cost.toFixed(2) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+
+  // Quantity breaks
+  if (cost.qty_breaks && cost.qty_breaks.length) {
+    html += '<div style="padding:0.6rem 1rem;border-top:1px solid #ddd;background:#fafdf8">';
+    html += '<div style="font-weight:600;font-size:0.85rem;margin-bottom:0.4rem;color:#1a3a1a">Quantity Price Breaks</div>';
+    html += '<div style="display:flex;gap:0;flex-wrap:wrap">';
+    cost.qty_breaks.forEach(function(qb) {
+      var sel = qb.selected;
+      html += '<div style="flex:1;min-width:80px;text-align:center;padding:0.5rem 0.3rem;border:1px solid ' + (sel ? '#2a5a2a' : '#e0e0e0') + ';background:' + (sel ? '#e8f5e9' : '#fff') + ';margin:2px;border-radius:4px">';
+      html += '<div style="font-size:0.7rem;color:#888">' + qb.qty + ' pcs</div>';
+      html += '<div style="font-size:0.95rem;font-weight:' + (sel ? '700' : '500') + ';color:' + (sel ? '#2a5a2a' : '#333') + '">$' + qb.unit_cost.toFixed(2) + '</div>';
+      html += '<div style="font-size:0.65rem;color:#999">ea</div>';
+      html += '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // Warnings
+  if (cost.warnings && cost.warnings.length) {
+    html += '<div style="padding:0.5rem 1rem;background:#fff8e1;border-top:1px solid #ddd;font-size:0.8rem;color:#795548">';
+    cost.warnings.forEach(function(w) { html += '<div>' + w + '</div>'; });
+    html += '</div>';
+  }
+
+  // Ramp factor note
+  html += '<div style="padding:0.3rem 1rem 0.5rem;font-size:0.7rem;color:#999;border-top:1px solid #eee">Ramp factor: ' + cost.ramp_factor + 'x (production efficiency at qty ' + cost.quantity + ')</div>';
+
+  html += '</div>';
   return html;
 }
 
@@ -1397,6 +1538,15 @@ def analyze():
     except (ValueError, TypeError):
         density, k_factor, material = 7.9, 0.44, "steel"
 
+        # Quantity for cost estimation
+        try:
+            quantity = max(1, int(request.form.get("quantity", "1")))
+        except (ValueError, TypeError):
+            quantity = 1
+
+        # Material name for cost engine
+        material_name = DENSITY_TO_MATERIAL.get(raw_density, "Mild/Carbon Steel")
+
     # create job directory
     job_id = str(uuid.uuid4())[:12]
     job_dir = os.path.join(app.config["UPLOAD_FOLDER"], job_id)
@@ -1562,6 +1712,14 @@ def analyze():
     except (json.JSONDecodeError, FileNotFoundError) as e:
         return jsonify({"error": f"Failed to read analysis results: {e}"}), 500
 
+        # -- Cost estimation --
+        cost_estimate = None
+        try:
+            cost_geo = _build_cost_geometry(geometry)
+            cost_estimate = cost_engine.estimate_cost(cost_geo, material_name, quantity)
+        except Exception as ce:
+            print(f"Warning: Cost estimation failed (non-fatal): {ce}")
+
     # build file URLs
     base = f"/files/{job_id}"
     files = {
@@ -1597,7 +1755,10 @@ def analyze():
     except Exception as db_err:
         print(f"Warning: Failed to save job to DB: {db_err}")
 
-    return jsonify({"geometry": geometry, "files": files, "job_id": job_id})
+    resp = {"geometry": geometry, "files": files, "job_id": job_id}
+        if cost_estimate:
+            resp["cost_estimate"] = cost_estimate
+        return jsonify(resp)
 
 
 @app.route("/history")
