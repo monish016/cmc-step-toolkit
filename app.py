@@ -649,23 +649,96 @@ function renderDrawingResult(r, idx) {
     html += '<div style="background:#e8f4ff;border:1px solid #b0d0f0;border-radius:6px;padding:0.8rem;margin-bottom:1rem;font-size:0.9rem">' + d.summary + '</div>';
   }
 
-  // Overall stats grid
-  html += '<div class="geo-grid">';
+  // STEP-style geometry stats grid
+  var cf = d._computed_flat || {};
+  var thkDisplay = '';
+  if (d.thickness && d.thickness.length) {
+    var t0 = d.thickness[0];
+    thkDisplay = t0.value_in + '"';
+    if (t0.gauge) thkDisplay += ' <span style="color:#2a5a2a;font-weight:600">(' + t0.gauge + ' GA)</span>';
+  }
+  var dimsDisplay = '';
+  if (d.dimensions && d.dimensions.length) {
+    var dm0 = d.dimensions[0];
+    dimsDisplay = dm0.length + '" x ' + dm0.width + '"';
+    if (dm0.height) dimsDisplay += ' x ' + dm0.height + '"';
+  }
+  var matDisplay = '';
   if (d.materials && d.materials.length) {
-    const uniqueMats = [];
-    const seen = {};
+    var uniqueMats = [];
+    var seen = {};
     d.materials.forEach(function(m) {
-      const k = (m.name || m.raw_callout).toUpperCase();
+      var k = (m.name || m.raw_callout).toUpperCase();
       if (!seen[k]) { seen[k] = true; uniqueMats.push(m.name || m.raw_callout); }
     });
-    html += '<div class="geo-stat"><div class="value" style="font-size:0.85rem">' + uniqueMats.slice(0,3).join(', ') + '</div><div class="label">Materials Found</div></div>';
+    matDisplay = uniqueMats.slice(0,2).join(', ');
   }
-  html += '<div class="geo-stat"><div class="value">' + d.page_count + '</div><div class="label">Total Pages</div></div>';
-  html += '<div class="geo-stat"><div class="value">' + drawingPageCount + '</div><div class="label">Drawing Pages</div></div>';
-  if (d.finishes && d.finishes.length) {
-    html += '<div class="geo-stat"><div class="value" style="font-size:0.85rem">' + d.finishes.map(function(f){return f.finish;}).join(', ') + '</div><div class="label">Finishes</div></div>';
+
+  html += '<div class="geo-grid">';
+  if (dimsDisplay) html += '<div class="geo-stat"><div class="value">' + dimsDisplay + '</div><div class="label">Overall Dimensions</div></div>';
+  if (thkDisplay) html += '<div class="geo-stat"><div class="value">' + thkDisplay + '</div><div class="label">Sheet Thickness</div></div>';
+  html += '<div class="geo-stat"><div class="value">' + (cf.num_bends || 0) + '</div><div class="label">Bends</div></div>';
+  if (matDisplay) html += '<div class="geo-stat"><div class="value" style="font-size:0.85rem">' + matDisplay + '</div><div class="label">Material</div></div>';
+  if (cf.flat_width_in) html += '<div class="geo-stat"><div class="value">' + cf.flat_width_in + '"</div><div class="label" title="Developed width after unfolding all bends">Flat/Dev Width</div></div>';
+  if (cf.flat_length_in) html += '<div class="geo-stat"><div class="value">' + cf.flat_length_in + '"</div><div class="label" title="Length along the bend axis">Flat/Dev Length</div></div>';
+  html += '</div>';
+
+  // Flat pattern image + views
+  html += '<div class="view-grid">';
+  if (r.files && r.files.flat_pattern) {
+    html += '<div class="view-item"><img src="' + r.files.flat_pattern + '" alt="Flat Pattern" onerror="hideParent(this)"><div class="view-label">Flat Pattern</div></div>';
   }
   html += '</div>';
+
+  // Detail table (bend info, tolerances, finishes)
+  html += '<table class="detail-table">';
+  if (cf.num_bends > 0 && cf.bend_angles && cf.bend_angles.length) {
+    html += '<tr><th>Bend angles</th><td>' + cf.bend_angles.map(function(a){return a.toFixed(0) + ' deg';}).join(', ') + '</td></tr>';
+    html += '<tr><th>Bend radius</th><td>' + (cf.bend_radius_in || '-') + '"</td></tr>';
+    html += '<tr><th>K-factor</th><td>' + (cf.k_factor || 0.44) + '</td></tr>';
+  }
+  if (d.tolerances && d.tolerances.length) {
+    var uniqTol = [];
+    var seenTol = {};
+    d.tolerances.forEach(function(t) { if (t.raw && !seenTol[t.raw]) { seenTol[t.raw] = true; uniqTol.push(t.raw); }});
+    if (uniqTol.length) html += '<tr><th>Tolerances</th><td>' + uniqTol.slice(0,5).join(', ') + '</td></tr>';
+  }
+  if (d.finishes && d.finishes.length) {
+    html += '<tr><th>Finish</th><td>' + d.finishes.map(function(f){return f.finish;}).join(', ') + '</td></tr>';
+  }
+  html += '<tr><th>Drawing pages</th><td>' + drawingPageCount + ' of ' + d.page_count + ' total</td></tr>';
+  html += '</table>';
+
+  // Download buttons (STEP-style)
+  html += '<div class="dl-row">';
+  if (r.files && r.files.report_pdf) {
+    html += '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download PDF Report</a>';
+  }
+  if (r.files && r.files.geometry_json) {
+    html += '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download JSON</a>';
+  }
+  html += '</div>';
+
+  // Overall features table
+  if (d.features && d.features.length) {
+    html += '<h4 style="margin:1rem 0 0.5rem;color:#2a5a2a;font-size:0.95rem">Extracted Features (from drawing callouts)</h4>';
+    html += '<table class="detail-table"><tr><th>Type</th><th>Count</th><th>Size</th><th>Callout</th></tr>';
+    d.features.forEach(function(f) {
+      var size = '';
+      if (f.type === 'round_hole' || f.type === 'counterbored_hole' || f.type === 'countersunk_hole') {
+        size = 'Dia ' + f.diameter_in + '"';
+        if (f.through) size += ' THRU';
+      } else if (f.type === 'tapped_hole') {
+        size = f.thread_spec;
+        if (f.through) size += ' THRU';
+      } else if (f.type === 'slot') {
+        size = f.width_in + '" x ' + f.length_in + '"';
+      }
+      var label = f.type.replace(/_/g, ' ');
+      html += '<tr><td>' + label + '</td><td>' + (f.count || 1) + '</td><td>' + size + '</td><td style="color:#666;font-size:0.75rem">' + (f.raw || '') + '</td></tr>';
+    });
+    html += '</table>';
+  }
 
   // Per-page results
   if (hasPages) {
@@ -730,7 +803,6 @@ function renderDrawingResult(r, idx) {
       }
       html += '</table>';
 
-
       // Per-page features table
       if (pg.features && pg.features.length) {
         html += '<h5 style="margin:0.6rem 0 0.3rem;color:#0066aa;font-size:0.8rem">Extracted Features (from drawing callouts)</h5>';
@@ -772,37 +844,7 @@ function renderDrawingResult(r, idx) {
 
       html += '</div></div>';
     });
-  } else {
-    // Fallback: single-page or no per-page data - show overall detail table
-    html += '<table class="detail-table">';
-    if (d.materials && d.materials.length) {
-      html += '<tr><th>Material callout(s)</th><td>' + d.materials.map(function(m) { return m.raw_callout; }).join(', ') + '</td></tr>';
-    }
-    if (d.thickness && d.thickness.length) {
-      html += '<tr><th>Thickness</th><td>' + d.thickness.map(function(t) { return t.raw; }).join(', ') + '</td></tr>';
-    }
-    if (d.tolerances && d.tolerances.length) {
-      html += '<tr><th>Tolerances</th><td>' + d.tolerances.map(function(t) { return t.raw; }).join(', ') + '</td></tr>';
-    }
-    const bends = d.bends || {};
-    if (bends.radii && bends.radii.length) {
-      html += '<tr><th>Bend radii</th><td>' + bends.radii.map(function(b) { return b.raw; }).join(', ') + '</td></tr>';
-    }
-    if (bends.angles && bends.angles.length) {
-      html += '<tr><th>Bend angles</th><td>' + bends.angles.map(function(b) { return b.raw; }).join(', ') + '</td></tr>';
-    }
-    if (d.finishes && d.finishes.length) {
-      html += '<tr><th>Finish</th><td>' + d.finishes.map(function(f) { return f.finish; }).join(', ') + '</td></tr>';
-    }
-    html += '</table>';
   }
-
-  // Download buttons
-  html += '<div class="dl-row" style="margin-top:1rem">';
-  if (r.files && r.files.geometry_json) {
-    html += '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download Full JSON</a>';
-  }
-  html += '</div>';
 
   html += '</div></div>';
   return html;
@@ -1019,7 +1061,6 @@ def _generate_drawing_page_report(page_data, output_path, source_filename):
         story.append(tbl)
         story.append(Spacer(1, 12))
 
-
     # Features table
     feats = page_data.get("features", [])
     if feats:
@@ -1065,8 +1106,258 @@ def _generate_drawing_page_report(page_data, output_path, source_filename):
     if missing:
         story.append(Paragraph("Missing Information", subtitle_style))
         for mi in missing:
-            story.append(Paragraph(f"• <b>{mi['field']}</b>: {mi['message']}", normal))
+            story.append(Paragraph(f"* <b>{mi['field']}</b>: {mi['message']}", normal))
         story.append(Spacer(1, 8))
+
+    doc.build(story)
+
+
+def _generate_drawing_flat_pattern(drawing_data, out_path):
+    """Generate an approximate flat pattern diagram from PDF drawing extraction data."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import math
+
+    # Gather per-page data (use first page with meaningful data, or overall)
+    pages = drawing_data.get("pages", [])
+    # Pick best page: first one with dimensions and thickness
+    best = None
+    for pg in pages:
+        has_dims = bool(pg.get("dimensions"))
+        has_thk = bool(pg.get("thickness"))
+        if has_dims and has_thk:
+            best = pg
+            break
+        if has_dims and best is None:
+            best = pg
+    if best is None:
+        best = drawing_data  # fallback to overall
+
+    dims = best.get("dimensions", drawing_data.get("dimensions", []))
+    thickness_list = best.get("thickness", drawing_data.get("thickness", []))
+    bends = best.get("bends", drawing_data.get("bends", {}))
+    features = best.get("features", drawing_data.get("features", []))
+
+    # Use largest dimension set
+    if dims:
+        d = max(dims, key=lambda x: x.get("length", 0) * x.get("width", 0))
+        overall_length = d.get("length", 10.0)
+        overall_width = d.get("width", 5.0)
+    else:
+        overall_length = 10.0
+        overall_width = 5.0
+
+    thickness = thickness_list[0]["value_in"] if thickness_list else 0.060
+
+    bend_angles = [b["value_deg"] for b in bends.get("angles", [])]
+    bend_radii = [b["value_in"] for b in bends.get("radii", [])]
+    num_bends = len(bend_angles) if bend_angles else 0
+    bend_radius = bend_radii[0] if bend_radii else thickness
+    k_factor = 0.44
+
+    # Compute developed width: add bend allowances to the formed dimension
+    if num_bends > 0:
+        total_ba = 0
+        for angle_deg in bend_angles:
+            angle_rad = math.radians(angle_deg)
+            ba = angle_rad * (bend_radius + k_factor * thickness)
+            total_ba += ba
+        flat_width = overall_width + total_ba
+    else:
+        flat_width = overall_width
+    flat_length = overall_length
+
+    # Store computed values back into drawing_data for frontend
+    drawing_data["_computed_flat"] = {
+        "flat_width_in": round(flat_width, 3),
+        "flat_length_in": round(flat_length, 3),
+        "thickness_in": thickness,
+        "num_bends": num_bends,
+        "bend_radius_in": round(bend_radius, 4),
+        "k_factor": k_factor,
+        "bend_angles": bend_angles,
+    }
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(16, 4.5))
+    LEN = flat_length
+    W = flat_width
+
+    # Outline
+    ax.plot([0, LEN, LEN, 0, 0], [0, 0, W, W, 0], color="black", lw=1.4)
+
+    # Bend lines (spaced proportionally)
+    if num_bends > 0:
+        segment_h = W / (num_bends + 1)
+        for i, angle_deg in enumerate(bend_angles):
+            y_pos = segment_h * (i + 1)
+            ax.axhline(y_pos, color="tab:blue", lw=0.9, linestyle="--")
+            ax.text(LEN + 0.15, y_pos, f"BEND {i+1} - {angle_deg:.0f} deg",
+                    va="center", fontsize=8, color="tab:blue")
+
+    # Feature markers (approximate positions along the centerline)
+    color_map = {"round_hole": "tab:green", "tapped_hole": "tab:red",
+                 "counterbored_hole": "tab:green", "countersunk_hole": "tab:green", "slot": "tab:purple"}
+    marker_map = {"round_hole": "o", "tapped_hole": "^",
+                  "counterbored_hole": "D", "countersunk_hole": "v", "slot": "s"}
+    seen_types = set()
+    feat_x_offset = 0.0
+    total_features = sum(f.get("count", 1) for f in features)
+    if total_features > 0 and LEN > 0:
+        spacing = LEN / (total_features + 1)
+    else:
+        spacing = 1.0
+    feat_idx = 0
+    for feat in features:
+        ftype = feat.get("type", "unknown")
+        count = feat.get("count", 1)
+        for c_i in range(count):
+            feat_idx += 1
+            fx = spacing * feat_idx
+            fy = W / 2  # center
+            label = ftype.replace("_", " ") if ftype not in seen_types else None
+            ax.scatter([fx], [fy], marker=marker_map.get(ftype, "x"), s=90,
+                       facecolors="none", edgecolors=color_map.get(ftype, "grey"),
+                       linewidths=1.4, label=label, zorder=5)
+            seen_types.add(ftype)
+
+    ax.set_xlim(-0.5, LEN + 3.5)
+    ax.set_ylim(-0.6, W + 0.6)
+    ax.set_aspect("equal")
+    ax.set_xlabel(f'Length (in) - {LEN:.3f}"')
+    ax.set_ylabel("Developed Width (in)")
+    title_parts = [f'Flat Pattern (from drawing) - {LEN:.3f}" x {W:.3f}"']
+    title_parts.append(f'thickness={thickness}"')
+    if num_bends > 0:
+        title_parts.append(f'{num_bends} bends')
+        title_parts.append(f'R={bend_radius}"')
+        title_parts.append(f'K={k_factor}')
+    ax.set_title(" | ".join(title_parts), fontsize=10)
+    if seen_types:
+        ax.legend(loc="upper left", bbox_to_anchor=(0, -0.18), ncol=5, fontsize=8, frameon=False)
+    ax.text(LEN * 0.02, W + 0.15,
+            "NOTE: Flat pattern approximated from drawing callouts. Bend line positions are evenly spaced estimates.",
+            fontsize=7, color="grey", style="italic")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220, facecolor="white")
+    plt.close()
+
+
+def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, source_filename):
+    """Generate an overall PDF report for a drawing analysis (similar to STEP report)."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("DrawTitle", parent=styles["Heading1"], fontSize=16, spaceAfter=8)
+    subtitle_style = ParagraphStyle("DrawSub", parent=styles["Heading2"], fontSize=12, spaceAfter=6, textColor=colors.HexColor("#336699"))
+    normal = styles["Normal"]
+
+    doc = SimpleDocTemplate(out_path, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    story = []
+
+    # Title
+    part_num = drawing_data.get("part_info", {}).get("part_number", "")
+    title = f"Drawing Analysis Report - {source_filename}"
+    if part_num:
+        title += f" ({part_num})"
+    story.append(Paragraph(title, title_style))
+    if drawing_data.get("summary"):
+        story.append(Paragraph(drawing_data["summary"], normal))
+    story.append(Spacer(1, 12))
+
+    # Geometry stats table
+    computed = drawing_data.get("_computed_flat", {})
+    rows = [["Property", "Value"]]
+    if drawing_data.get("materials"):
+        mats = ", ".join(set(m.get("name") or m["raw_callout"] for m in drawing_data["materials"][:5]))
+        rows.append(["Material", mats])
+    if computed.get("thickness_in"):
+        thk = drawing_data.get("thickness", [{}])
+        gauge_str = f' ({thk[0]["gauge"]} GA)' if thk and thk[0].get("gauge") else ""
+        rows.append(["Thickness", f'{computed["thickness_in"]}"{gauge_str}'])
+    if computed.get("flat_width_in"):
+        rows.append(["Developed Width", f'{computed["flat_width_in"]}"'])
+    if computed.get("flat_length_in"):
+        rows.append(["Flat Length", f'{computed["flat_length_in"]}"'])
+    if computed.get("num_bends", 0) > 0:
+        rows.append(["Bends", str(computed["num_bends"])])
+        rows.append(["Bend Angles", ", ".join(f'{a:.0f} deg' for a in computed.get("bend_angles", []))])
+        rows.append(["Bend Radius", f'{computed.get("bend_radius_in", 0)}"'])
+        rows.append(["K-factor", str(computed.get("k_factor", 0.44))])
+    if drawing_data.get("finishes"):
+        rows.append(["Finish", ", ".join(f["finish"] for f in drawing_data["finishes"])])
+    fab = drawing_data.get("likely_fab_type", "unknown")
+    conf = drawing_data.get("fab_type_confidence", "low")
+    rows.append(["Fab Type", f"{fab} ({conf} confidence)"])
+
+    if len(rows) > 1:
+        story.append(Paragraph("Extracted Specifications", subtitle_style))
+        col_widths = [2 * inch, 4.5 * inch]
+        tbl = Table(rows, colWidths=col_widths)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2a5a2a")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f4f4")]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(tbl)
+        story.append(Spacer(1, 12))
+
+    # Flat pattern image
+    import os
+    if flat_pattern_path and os.path.isfile(flat_pattern_path):
+        story.append(Paragraph("Computed Flat Pattern", subtitle_style))
+        try:
+            img = RLImage(flat_pattern_path, width=6.5*inch, height=2*inch)
+            story.append(img)
+            story.append(Spacer(1, 12))
+        except Exception:
+            pass
+
+    # Features table (combined from all pages)
+    all_feats = drawing_data.get("features", [])
+    if all_feats:
+        story.append(Paragraph("Extracted Features", subtitle_style))
+        feat_rows = [["Type", "Count", "Size", "Callout"]]
+        for ft in all_feats:
+            ftype = ft.get("type", "").replace("_", " ")
+            count = str(ft.get("count", 1))
+            if ft["type"] in ("round_hole", "counterbored_hole", "countersunk_hole"):
+                size = f'Dia {ft.get("diameter_in", "?")}"'
+                if ft.get("through"):
+                    size += " THRU"
+            elif ft["type"] == "tapped_hole":
+                size = ft.get("thread_spec", "?")
+                if ft.get("through"):
+                    size += " THRU"
+            elif ft["type"] == "slot":
+                size = f'{ft.get("width_in", "?")}" x {ft.get("length_in", "?")}"'
+            else:
+                size = ft.get("raw", "")
+            feat_rows.append([ftype, count, size, ft.get("raw", "")])
+        feat_col_widths = [1.2*inch, 0.6*inch, 2.5*inch, 2.5*inch]
+        feat_tbl = Table(feat_rows, colWidths=feat_col_widths)
+        feat_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0066aa")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f6ff")]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(feat_tbl)
 
     doc.build(story)
 
@@ -1146,6 +1437,20 @@ def analyze():
         if "error" in drawing_data:
             return jsonify({"error": drawing_data["error"]}), 500
 
+        # Generate flat pattern image from drawing data
+        flat_path = os.path.join(job_dir, "flat_pattern.png")
+        try:
+            _generate_drawing_flat_pattern(drawing_data, flat_path)
+        except Exception as fp_err:
+            print(f"Warning: Failed to generate drawing flat pattern: {fp_err}")
+
+        # Generate overall report PDF
+        report_path = os.path.join(job_dir, f"{part_stem}_report.pdf")
+        try:
+            _generate_drawing_overall_report(drawing_data, flat_path, report_path, safe_name)
+        except Exception as rpt_err:
+            print(f"Warning: Failed to generate overall drawing report: {rpt_err}")
+
         # Generate per-page PDF reports if pages exist
         page_reports = {}
         if drawing_data.get("pages"):
@@ -1161,7 +1466,11 @@ def analyze():
 
         # Build file URLs
         base = f"/files/{job_id}"
-        files = {"geometry_json": f"{base}/geometry_extract.json"}
+        files = {
+            "geometry_json": f"{base}/geometry_extract.json",
+            "flat_pattern": f"{base}/flat_pattern.png",
+            "report_pdf": f"{base}/{part_stem}_report.pdf",
+        }
         # Add per-page report URLs
         for pg_num, rpt_name in page_reports.items():
             files[f"page_{pg_num}_report"] = f"{base}/{rpt_name}"
@@ -1184,7 +1493,7 @@ def analyze():
             "dimensions": f"{drawing_pages} drawing pages" if drawing_pages > 1 else dims,
             "num_bends": 0,
             "weight": mat_name or "PDF drawing",
-            "report_url": None,
+            "report_url": files.get("report_pdf"),
             "json_url": files["geometry_json"],
         }
         try:
