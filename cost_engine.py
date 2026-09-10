@@ -161,6 +161,32 @@ def _normalize_material(material_str):
         return "wood"
     return "carbon_steel"  # default
 
+MATERIAL_COST_PER_LB = {
+    "carbon_steel":    0.45,
+    "stainless_steel": 1.85,
+    "aluminum":        2.50,
+    "copper":          4.80,
+    "brass":           3.20,
+    "titanium":       12.00,
+    "uhmw":            1.60,
+    "acetal":          2.80,
+    "wood":            0.30,
+}
+
+HARDWARE_TIME_PER_INSERT = 0.015  # hr/insert
+HARDWARE_SETUP = 0.20
+TAP_TIME_PER_HOLE = {"small": 0.008, "medium": 0.012, "large": 0.018}
+TAP_SETUP = 0.20
+CSINK_TIME_PER_HOLE = 0.010
+CSINK_SETUP = 0.15
+PASSIVATION_TIME_PER_SQFT = 0.04
+PASSIVATION_SETUP = 0.35
+PASSIVATION_MIN_CHARGE = 0.25
+SAW_TIME_PER_CUT = {"carbon_steel": 0.05, "stainless_steel": 0.08, "aluminum": 0.03, "copper": 0.04, "brass": 0.04, "titanium": 0.12}
+PACKAGING_TIME_PER_PART = 0.005
+PACKAGING_SETUP = 0.15
+PACKAGING_RATE = 125.00
+
 
 def _get_ramp_factor(qty):
     """Interpolate production ramp factor for a given quantity."""
@@ -381,11 +407,122 @@ def estimate_cost(geometry, material_str, quantity=1):
                 "total_cost": round(deburr_cost, 2),
             })
 
+        # 4. Hardware insertion (PEM studs/nuts)
+        hardware_count = geometry.get("hardware_count", 0) or 0
+        if hardware_count > 0:
+            hw_cycle = HARDWARE_TIME_PER_INSERT * hardware_count
+            hw_run = hw_cycle / ramp * quantity
+            hw_setup = HARDWARE_SETUP
+            hw_total = hw_setup + hw_run
+            hw_rate = RATES["labor_only"]
+            hw_cost = hw_total * hw_rate
+
+            operations.append({
+                "operation": "Hardware Insertion (PEM)",
+                "op_key": "hardware",
+                "count": hardware_count,
+                "cycle_time_hr": round(hw_cycle, 4),
+                "setup_hr": round(hw_setup, 2),
+                "run_time_hr": round(hw_run, 4),
+                "total_time_hr": round(hw_total, 4),
+                "rate_per_hr": hw_rate,
+                "total_cost": round(hw_cost, 2),
+            })
+
+        # 5. Tapping
+        tap_count = geometry.get("tap_count", 0) or 0
+        if tap_count > 0:
+            tap_size = geometry.get("tap_size_class", "medium")
+            tap_cycle = TAP_TIME_PER_HOLE.get(tap_size, 0.012) * tap_count
+            tap_run = tap_cycle / ramp * quantity
+            tap_setup = TAP_SETUP
+            tap_total = tap_setup + tap_run
+            tap_rate = RATES["labor_only"]
+            tap_cost = tap_total * tap_rate
+
+            operations.append({
+                "operation": f"Tapping ({tap_count} holes)",
+                "op_key": "tapping",
+                "count": tap_count,
+                "cycle_time_hr": round(tap_cycle, 4),
+                "setup_hr": round(tap_setup, 2),
+                "run_time_hr": round(tap_run, 4),
+                "total_time_hr": round(tap_total, 4),
+                "rate_per_hr": tap_rate,
+                "total_cost": round(tap_cost, 2),
+            })
+
+        # 6. Countersinking
+        csink_count = geometry.get("csink_count", 0) or 0
+        if csink_count > 0:
+            cs_cycle = CSINK_TIME_PER_HOLE * csink_count
+            cs_run = cs_cycle / ramp * quantity
+            cs_setup = CSINK_SETUP
+            cs_total = cs_setup + cs_run
+            cs_rate = RATES["labor_only"]
+            cs_cost = cs_total * cs_rate
+
+            operations.append({
+                "operation": f"Countersink ({csink_count} holes)",
+                "op_key": "countersink",
+                "count": csink_count,
+                "cycle_time_hr": round(cs_cycle, 4),
+                "setup_hr": round(cs_setup, 2),
+                "run_time_hr": round(cs_run, 4),
+                "total_time_hr": round(cs_total, 4),
+                "rate_per_hr": cs_rate,
+                "total_cost": round(cs_cost, 2),
+            })
+
+        # 7. Passivation (stainless steel only, batch dip process)
+        if material == "stainless_steel":
+            part_area_sqft = (flat_l * flat_w * 2) / 144.0 if flat_l > 0 and flat_w > 0 else 0.5
+            pass_cycle = max(PASSIVATION_TIME_PER_SQFT * part_area_sqft, PASSIVATION_MIN_CHARGE)
+            # Batch dip: ~50 parts per tank load, same soak time per batch
+            parts_per_batch = 50
+            n_pass_batches = max(1, -(-quantity // parts_per_batch))  # ceiling division
+            pass_run = pass_cycle * n_pass_batches
+            pass_setup = PASSIVATION_SETUP
+            pass_total = pass_setup + pass_run
+            pass_rate = RATES["passivation"]
+            pass_cost = pass_total * pass_rate
+
+            operations.append({
+                "operation": "Passivation (Citric Acid)",
+                "op_key": "passivation",
+                "area_sqft": round(part_area_sqft, 3),
+                "cycle_time_hr": round(pass_cycle, 4),
+                "setup_hr": round(pass_setup, 2),
+                "run_time_hr": round(pass_run, 4),
+                "total_time_hr": round(pass_total, 4),
+                "rate_per_hr": pass_rate,
+                "total_cost": round(pass_cost, 2),
+            })
+
     # ââ Machined Part Path ââââââââââââââââââââââââââââââââââââââ
     elif "machin" in fab_type:
         volume_removed = geometry.get("volume_in3", 0.0) or 0.0
 
-        # Turning (if roughly cylindrical - height >> width ~= length)
+        # 1. Sawing (bar stock cutoff)
+        saw_time = SAW_TIME_PER_CUT.get(material, 0.05)
+        saw_run = saw_time / ramp * quantity
+        saw_setup = SETUP["sawing"]
+        saw_total = saw_setup + saw_run
+        saw_rate = RATES["sawing"]
+        saw_cost = saw_total * saw_rate
+
+        operations.append({
+            "operation": "Band Saw (Bar Stock Cutoff)",
+            "op_key": "sawing",
+            "cycle_time_hr": round(saw_time, 4),
+            "setup_hr": round(saw_setup, 2),
+            "run_time_hr": round(saw_run, 4),
+            "total_time_hr": round(saw_total, 4),
+            "rate_per_hr": saw_rate,
+            "total_cost": round(saw_cost, 2),
+        })
+
+        # 2. CNC operation - Turning (if roughly cylindrical) or Milling
         l = dims.get("length", 0)
         w = dims.get("width", 0)
         h = dims.get("height", 0)
@@ -457,6 +594,44 @@ def estimate_cost(geometry, material_str, quantity=1):
             "rate_per_hr": weld_rate,
             "total_cost": round(weld_cost, 2),
         })
+
+    # -- Material Cost --------------------------------------------------
+    mat_cost_per_lb = MATERIAL_COST_PER_LB.get(material, 0.50)
+    if weight > 0:
+        # Add 15% scrap/kerf allowance
+        mat_weight = weight * 1.15
+        mat_cost_total = mat_cost_per_lb * mat_weight * quantity
+        operations.append({
+            "operation": "Raw Material",
+            "op_key": "material",
+            "weight_lb": round(weight, 3),
+            "scrap_allowance": "15%",
+            "cost_per_lb": mat_cost_per_lb,
+            "cycle_time_hr": 0,
+            "setup_hr": 0,
+            "run_time_hr": 0,
+            "total_time_hr": 0,
+            "rate_per_hr": 0,
+            "total_cost": round(mat_cost_total, 2),
+        })
+
+    # -- Packaging / Final Inspection ------------------------------------
+    pkg_cycle = PACKAGING_TIME_PER_PART
+    pkg_run = pkg_cycle * quantity  # no ramp - constant per part
+    pkg_setup = PACKAGING_SETUP
+    pkg_total = pkg_setup + pkg_run
+    pkg_cost = pkg_total * PACKAGING_RATE
+
+    operations.append({
+        "operation": "Packaging & Inspection",
+        "op_key": "packaging",
+        "cycle_time_hr": round(pkg_cycle, 4),
+        "setup_hr": round(pkg_setup, 2),
+        "run_time_hr": round(pkg_run, 4),
+        "total_time_hr": round(pkg_total, 4),
+        "rate_per_hr": PACKAGING_RATE,
+        "total_cost": round(pkg_cost, 2),
+    })
 
     # ââ Totals ââââââââââââââââââââââââââââââââââââââââââââââââââ
     total_cost = sum(op["total_cost"] for op in operations)
@@ -544,7 +719,61 @@ def estimate_cost_simple(geometry, material_str, quantity=1):
             if weight > SECOND_OP_WEIGHT_LB or max_dim > SECOND_OP_SIZE_IN:
                 total_cost += br * RATES["labor_only"]
 
+        # Deburr (sheet metal)
+        flat_l = geometry.get("flat_length_in", 0) or 0
+        flat_w = geometry.get("flat_width_in", 0) or 0
+        if flat_l > 0 and flat_w > 0:
+            if material == "stainless_steel" and thickness <= 0.5 and flat_w <= 32:
+                dc = 0.08 * (flat_l * flat_w) / 144.0
+            else:
+                dc = 0.20
+            dr = dc / ramp * quantity
+            dt = SETUP.get("deburr_apex", 0.25) + dr
+            total_time += dt
+            total_cost += dt * RATES.get("deburr_apex", 125.76)
+
+        # Hardware insertion
+        hw = geometry.get("hardware_count", 0) or 0
+        if hw > 0:
+            hr_ = HARDWARE_TIME_PER_INSERT * hw / ramp * quantity
+            ht = HARDWARE_SETUP + hr_
+            total_time += ht
+            total_cost += ht * RATES["labor_only"]
+
+        # Tapping
+        tc = geometry.get("tap_count", 0) or 0
+        if tc > 0:
+            tr_ = TAP_TIME_PER_HOLE["medium"] * tc / ramp * quantity
+            tt = TAP_SETUP + tr_
+            total_time += tt
+            total_cost += tt * RATES["labor_only"]
+
+        # Countersinking
+        cc = geometry.get("csink_count", 0) or 0
+        if cc > 0:
+            cr_ = CSINK_TIME_PER_HOLE * cc / ramp * quantity
+            ct = CSINK_SETUP + cr_
+            total_time += ct
+            total_cost += ct * RATES["labor_only"]
+
+        # Passivation (stainless, batch dip)
+        if material == "stainless_steel":
+            pa = max(PASSIVATION_TIME_PER_SQFT * 0.5, PASSIVATION_MIN_CHARGE)
+            n_pb = max(1, -(-quantity // 50))
+            pr_ = pa * n_pb
+            pt = PASSIVATION_SETUP + pr_
+            total_time += pt
+            total_cost += pt * RATES["passivation"]
+
     elif "machin" in fab_type:
+        # Sawing
+        st_ = SAW_TIME_PER_CUT.get(material, 0.05)
+        sr_ = st_ / ramp * quantity
+        s_total = SETUP["sawing"] + sr_
+        total_time += s_total
+        total_cost += s_total * RATES["sawing"]
+
+        # CNC
         volume = geometry.get("volume_in3", 0.0) or 0.0
         cycle = max((volume / 1.8 / 60.0), 0.25) if volume > 0 else 0.25
         op_key = "st30_turning"
@@ -559,6 +788,17 @@ def estimate_cost_simple(geometry, material_str, quantity=1):
         wt = SETUP["tig_weld"] + wr
         total_time += wt
         total_cost += wt * RATES["tig_weld"]
+
+    # Material cost
+    mat_cpl = MATERIAL_COST_PER_LB.get(material, 0.50)
+    if weight > 0:
+        total_cost += mat_cpl * weight * 1.15 * quantity
+
+    # Packaging
+    pkg_r = PACKAGING_TIME_PER_PART * quantity
+    pkg_t = PACKAGING_SETUP + pkg_r
+    total_time += pkg_t
+    total_cost += pkg_t * PACKAGING_RATE
 
     unit_cost = total_cost / max(quantity, 1)
     return {"total_cost": round(total_cost, 2), "unit_cost": round(unit_cost, 2), "total_time_hr": round(total_time, 4)}
