@@ -1078,6 +1078,11 @@ def classify_cluster(members):
             d1, d2 = dims[0], dims[1]
             if d1 < 1.5 or d2 < 1.5:
                 return None
+            # High aspect ratio = slot/notch, not a square/rect hole
+            if d2 > 0 and d1 / d2 > 4:
+                return {"type": "slot",
+                        "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
+                        "center": (cx, cy, cz), "confidence": "high"}
             return {"type": "square_or_rect",
                     "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                     "center": (cx, cy, cz), "confidence": "high"}
@@ -1104,6 +1109,11 @@ def classify_cluster(members):
                 dims = sorted([xl, yl, zl], reverse=True)
                 d1, d2 = dims[0], dims[1]
                 if d1 >= 1.5 and d2 >= 1.5:
+                    # High aspect ratio = slot/notch
+                    if d2 > 0 and d1 / d2 > 4:
+                        return {"type": "slot",
+                                "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
+                                "center": (cx, cy, cz), "confidence": "medium"}
                     return {"type": "square_or_rect",
                             "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                             "center": (cx, cy, cz), "confidence": "medium"}
@@ -1151,6 +1161,10 @@ def classify_cluster(members):
         d1, d2 = dims[0], dims[1]
         if d1 < 1.5 or d2 < 1.5:
             return None
+        # High aspect ratio = slot/notch
+        if d2 > 0 and d1 / d2 > 4:
+            return {"type": "slot", "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
+                    "center": (cx, cy, cz), "confidence": "high"}
         return {"type": "square_or_rect", "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                 "center": (cx, cy, cz), "confidence": "high"}
 
