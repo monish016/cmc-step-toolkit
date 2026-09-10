@@ -39,6 +39,7 @@ COPY generate_views.py .
 COPY render_flat_pattern.py .
 COPY generate_report.py .
 COPY drawing_extractor.py .
+COPY cost_engine.py .
 COPY app.py .
 COPY INSTRUCTIONS.md .
 
