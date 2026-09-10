@@ -124,8 +124,30 @@ def _build_cost_geometry(geometry):
     flat_l = float(geometry.get("flat_length_in", 0) or 0)
     features = geometry.get("features", [])
 
-    # Count holes
-    hole_count = sum(1 for f in features if f.get("type") in ("round", "countersink"))
+    # Classify features for secondary operations
+    hole_count = 0
+    tap_count = 0
+    csink_count = 0
+    hardware_count = 0
+    tap_sizes = []
+
+    for f in features:
+        ftype = f.get("type", "")
+        hint = (f.get("hardware_hint", "") or "").lower()
+        if ftype == "countersink":
+            csink_count += 1
+            hole_count += 1
+        elif ftype == "round":
+            hole_count += 1
+            if "tap" in hint:
+                tap_count += 1
+                dia = f.get("diameter_in", 0) or 0
+                if dia < 0.15: tap_sizes.append("small")
+                elif dia < 0.35: tap_sizes.append("medium")
+                else: tap_sizes.append("large")
+            elif "clearance" in hint:
+                hardware_count += 1
+    tap_size_class = max(set(tap_sizes), key=tap_sizes.count) if tap_sizes else "medium"
 
     # Estimate cut perimeter from flat pattern + features
     outer_perim = 2 * (flat_w + flat_l) if flat_w > 0 and flat_l > 0 else 2 * (x_in + y_in)
@@ -160,6 +182,10 @@ def _build_cost_geometry(geometry):
         "flat_length_in": flat_l,
         "weight_lb": env.get("mass_lb", 0) or 0,
         "hole_count": hole_count,
+        "tap_count": tap_count,
+        "tap_size_class": tap_size_class,
+        "csink_count": csink_count,
+        "hardware_count": hardware_count,
         "volume_in3": vol_in3,
         "machining_type": geometry.get("machining_type", None),
         "material_removal_ratio": geometry.get("material_removal_ratio", 0),
