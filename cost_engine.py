@@ -1,142 +1,285 @@
 """
-CMC Shop Cost Engine v1.0
-Estimates fabrication cost from extracted geometry using the Shop Standard Time Database.
+CMC Shop Cost Engine v2.0
+Estimates fabrication cost from extracted geometry.
 
-Inputs: geometry dict (from STEP or PDF extraction) + material + quantity
-Outputs: cost breakdown with routing, time, and price per operation
+All rates/speeds/times are loaded from a config dict (editable via the Shop Rates
+admin panel).  When no config is supplied, DEFAULT_CONFIG is used.
 """
+import copy
 
-# ââ All-In Rates ($/hr) âââââââââââââââââââââââââââââââââââââââââââââ
-# From Master Operation DB: labor + burden + depreciation + electricity
-RATES = {
-    "laser":          171.00,
-    "water_jet":      178.00,
-    "brake_adira":    157.27,
-    "brake_guifil":   146.51,
-    "st30_turning":   152.27,
-    "tm2p_milling":   166.06,
-    "tl2_turning":    125.45,
-    "shear":          146.51,
-    "tig_weld":       131.11,
-    "mig_weld":       133.81,
-    "laser_weld":     129.53,
-    "deburr_apex":    125.76,
-    "deburr_manual":  125.45,
-    "deburr_hand":    125.00,
-    "passivation":    125.30,
-    "sheet_handling":  125.00,
-    "sawing":         125.76,
-    "labor_only":     125.00,
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+#  DEFAULT CONFIGURATION  (seed values â overridden by admin panel)
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
+DEFAULT_CONFIG = {
+    # ââ Machine Rates ($/hr) ââââââââââââââââââââââââââââââââââââââ
+    "rates": {
+        "laser":          171.00,
+        "water_jet":      178.00,
+        "brake_adira":    157.27,
+        "brake_guifil":   146.51,
+        "st30_turning":   152.27,
+        "tm2p_milling":   166.06,
+        "tl2_turning":    125.45,
+        "shear":          146.51,
+        "tig_weld":       131.11,
+        "mig_weld":       133.81,
+        "laser_weld":     129.53,
+        "deburr_apex":    125.76,
+        "deburr_manual":  125.45,
+        "deburr_hand":    125.00,
+        "passivation":    125.30,
+        "sheet_handling":  125.00,
+        "sawing":         125.76,
+        "labor_only":     125.00,
+    },
+
+    # ââ Setup Times (hr) ââââââââââââââââââââââââââââââââââââââââââ
+    "setup": {
+        "laser":         0.55,
+        "water_jet":     0.55,
+        "brake_adira":   0.55,
+        "brake_guifil":  0.55,
+        "st30_turning":  0.65,
+        "tm2p_milling":  2.15,
+        "tl2_turning":   0.65,
+        "shear":         0.35,
+        "tig_weld":      0.30,
+        "mig_weld":      0.30,
+        "laser_weld":    0.30,
+        "deburr_apex":   0.25,
+        "deburr_hand":   0.25,
+        "sawing":        0.30,
+    },
+
+    # ââ Laser Cut Speeds (IPM) ââââââââââââââââââââââââââââââââââââ
+    # key = "material|thickness_in"  e.g. "carbon_steel|0.125"
+    "laser_speeds": {
+        "carbon_steel|0.030":    550,
+        "carbon_steel|0.048":    480,
+        "carbon_steel|0.060":    420,
+        "carbon_steel|0.075":    350,
+        "carbon_steel|0.090":    290,
+        "carbon_steel|0.120":    220,
+        "carbon_steel|0.125":    320,
+        "carbon_steel|0.1875":   140,
+        "carbon_steel|0.250":    160,
+        "carbon_steel|0.375":     55,
+        "carbon_steel|0.500":     80,
+        "carbon_steel|0.750":     48,
+        "carbon_steel|1.000":     28,
+        "stainless_steel|0.030":  450,
+        "stainless_steel|0.048":  380,
+        "stainless_steel|0.060":  320,
+        "stainless_steel|0.075":  260,
+        "stainless_steel|0.090":  210,
+        "stainless_steel|0.120":  160,
+        "stainless_steel|0.125":  240,
+        "stainless_steel|0.1875": 100,
+        "stainless_steel|0.250":  112,
+        "stainless_steel|0.375":   35,
+        "stainless_steel|0.500":   48,
+        "stainless_steel|0.750":   24,
+        "stainless_steel|1.000":   14.4,
+        "aluminum|0.030":         700,
+        "aluminum|0.048":         600,
+        "aluminum|0.060":         520,
+        "aluminum|0.075":         440,
+        "aluminum|0.090":         380,
+        "aluminum|0.120":         300,
+        "aluminum|0.125":         290,
+        "aluminum|0.1875":        180,
+        "aluminum|0.250":         120,
+        "aluminum|0.375":          65,
+        "aluminum|0.500":          35,
+    },
+
+    # ââ Laser Capable Materials âââââââââââââââââââââââââââââââââââ
+    # Materials the laser can cut, and max thickness (in)
+    "laser_capable": {
+        "carbon_steel":    1.000,
+        "stainless_steel": 1.000,
+        "aluminum":        0.500,
+    },
+
+    # ââ Water Jet Speeds (IPM) ââââââââââââââââââââââââââââââââââââ
+    # key = "thickness_in", value = [standard, precision]
+    "waterjet_speeds": {
+        "0.250": [8.0, 4.0],
+        "0.500": [4.0, 2.0],
+        "1.000": [1.5, 0.75],
+        "2.000": [0.6, 0.3],
+    },
+
+    # ââ Machinability Index (mild steel = 1.0) ââââââââââââââââââââ
+    "machinability": {
+        "carbon_steel":    1.0,
+        "stainless_steel": 0.9,
+        "aluminum":        2.9,
+        "copper":          2.0,
+        "brass":           2.5,
+        "titanium":        0.4,
+        "wood":            5.0,
+        "uhmw":            6.0,
+        "acetal":          5.5,
+    },
+
+    # ââ Press Brake âââââââââââââââââââââââââââââââââââââââââââââââ
+    "bend_time_per_bend": {
+        "brake_adira":  0.05,
+        "brake_guifil": 0.06,
+    },
+
+    # ââ Welding (hr/weld-inch) ââââââââââââââââââââââââââââââââââââ
+    "weld_rates": {
+        "tig":   0.01058,
+        "mig":   0.00280,
+        "laser": 0.00444,
+    },
+
+    # ââ Production Ramp âââââââââââââââââââââââââââââââââââââââââââ
+    # [qty, ramp_factor]  (lower = more time per piece)
+    "ramp_table": [
+        [1,    0.50],
+        [10,   0.65],
+        [25,   0.80],
+        [50,   0.90],
+        [100,  1.00],
+        [1000, 1.00],
+    ],
+
+    # ââ Batch Handling ââââââââââââââââââââââââââââââââââââââââââââ
+    "batch_threshold_hr": 6.0,
+    "batch_handling": {
+        "laser":        0.20,
+        "water_jet":    0.20,
+        "brake_adira":  0.15,
+        "brake_guifil": 0.15,
+        "tig_weld":     0.20,
+    },
+
+    # ââ Second Operator Rules âââââââââââââââââââââââââââââââââââââ
+    "second_op_weight_lb": 50,
+    "second_op_size_in":   60,
+
+    # ââ Material Density (lb/in^3) ââââââââââââââââââââââââââââââââ
+    "density": {
+        "carbon_steel":    0.284,
+        "stainless_steel": 0.289,
+        "aluminum":        0.098,
+        "copper":          0.323,
+        "brass":           0.307,
+        "titanium":        0.163,
+    },
+
+    # ââ Raw Material Cost ($/lb) ââââââââââââââââââââââââââââââââââ
+    "material_cost_per_lb": {
+        "carbon_steel":    1.10,
+        "stainless_steel": 3.25,
+        "aluminum":        3.50,
+        "copper":          4.80,
+        "brass":           3.20,
+        "titanium":       12.00,
+        "uhmw":            1.60,
+        "acetal":          2.80,
+        "wood":            0.30,
+    },
+
+    # ââ Hardware Insertion ââââââââââââââââââââââââââââââââââââââââ
+    "hardware_time_per_insert": 0.015,
+    "hardware_setup": 0.20,
+
+    # ââ Tapping âââââââââââââââââââââââââââââââââââââââââââââââââââ
+    "tap_time_per_hole": {
+        "small":  0.008,
+        "medium": 0.012,
+        "large":  0.018,
+    },
+    "tap_setup": 0.20,
+
+    # ââ Countersinking ââââââââââââââââââââââââââââââââââââââââââââ
+    "csink_time_per_hole": 0.010,
+    "csink_setup": 0.15,
+
+    # ââ Passivation âââââââââââââââââââââââââââââââââââââââââââââââ
+    "passivation_time_per_sqft": 0.04,
+    "passivation_setup": 0.35,
+    "passivation_min_charge": 0.25,
+    "passivation_parts_per_batch": 50,
+
+    # ââ Sawing ââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    "saw_time_per_cut": {
+        "carbon_steel":    0.05,
+        "stainless_steel": 0.08,
+        "aluminum":        0.03,
+        "copper":          0.04,
+        "brass":           0.04,
+        "titanium":        0.12,
+    },
+
+    # ââ CNC Material Removal Rates (in^3/min) ââââââââââââââââââââ
+    "mrr_turning": {
+        "carbon_steel":    1.8,
+        "stainless_steel": 1.5,
+        "aluminum":        4.0,
+        "copper":          2.5,
+        "brass":           3.0,
+        "titanium":        0.6,
+    },
+    "mrr_milling": {
+        "carbon_steel":    0.8,
+        "stainless_steel": 0.6,
+        "aluminum":        2.0,
+        "copper":          1.2,
+        "brass":           1.5,
+        "titanium":        0.3,
+    },
+
+    # ââ Deburring âââââââââââââââââââââââââââââââââââââââââââââââââ
+    "deburr_apex_hr_per_sqft": 0.08,
+    "deburr_hand_hr_per_part": 0.20,
+    "deburr_apex_max_thickness": 0.5,
+    "deburr_apex_max_width": 32,
+
+    # ââ Packaging / Final Inspection ââââââââââââââââââââââââââââââ
+    "packaging_time_per_part": 0.005,
+    "packaging_setup": 0.15,
+    "packaging_rate": 125.00,
+
+    # ââ Scrap Allowance âââââââââââââââââââââââââââââââââââââââââââ
+    "scrap_allowance_pct": 15,
+
+    # ââ Markups & Minimums ââââââââââââââââââââââââââââââââââââââââ
+    "minimum_order_charge": 75.00,
+    "rush_premium_pct": 50,
+    "material_markup_pct": 15,
+    "shop_markup_pct": 0,
 }
 
-# ââ Setup Times (hr) ââââââââââââââââââââââââââââââââââââââââââââââââ
-# From Master Operation DB: programming + material pull + staging + accounting + QA
-SETUP = {
-    "laser":         0.55,
-    "water_jet":     0.55,
-    "brake_adira":   0.55,
-    "brake_guifil":  0.55,
-    "st30_turning":  0.65,
-    "tm2p_milling":  2.15,
-    "tl2_turning":   0.65,
-    "shear":         0.35,
-    "tig_weld":      0.30,
-    "mig_weld":      0.30,
-    "laser_weld":    0.30,
-    "deburr_apex":   0.25,
-    "deburr_hand":   0.25,
-    "sawing":        0.30,
-}
 
-# ââ Laser Cutting Speeds (in/min, standard edge, 20% reduced from published) ââ
-# HSG G4020X 12kW fiber laser
-LASER_SPEEDS = {
-    # (material, thickness_in): speed_ipm
-    ("carbon_steel", 0.125): 320,
-    ("carbon_steel", 0.250): 160,
-    ("carbon_steel", 0.500):  80,
-    ("carbon_steel", 0.750):  48,
-    ("carbon_steel", 1.000):  28,
-    ("stainless_steel", 0.125): 240,
-    ("stainless_steel", 0.250): 112,
-    ("stainless_steel", 0.500):  48,
-    ("stainless_steel", 0.750):  24,
-    ("stainless_steel", 1.000):  14.4,
-}
-
-# ââ Water Jet Cutting Speeds (in/min, mild steel baseline) ââââââââââ
-# OMAX 60120 w/ A-Jet
-WATERJET_SPEEDS_STEEL = {
-    # thickness_in: (standard_tol, precision_tol)
-    0.250: (8.0, 4.0),
-    0.500: (4.0, 2.0),
-    1.000: (1.5, 0.75),
-    2.000: (0.6, 0.3),
-}
-
-# Machinability index (mild steel = 1.0)
-MACHINABILITY = {
-    "carbon_steel":    1.0,
-    "stainless_steel": 0.9,
-    "aluminum":        2.9,
-    "wood":            5.0,
-    "uhmw":            6.0,
-    "acetal":          5.5,
-}
-
-# ââ Press Brake âââââââââââââââââââââââââââââââââââââââââââââââââââââ
-BEND_TIME_PER_BEND = {
-    "brake_adira":  0.05,   # hr/bend
-    "brake_guifil": 0.06,   # hr/bend
-}
-
-# ââ Welding âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-WELD_RATES = {
-    # method: effective hr/weld-inch
-    "tig":   0.01058,
-    "mig":   0.00280,
-    "laser": 0.00444,
-}
-
-# ââ Production Ramp âââââââââââââââââââââââââââââââââââââââââââââââââ
-# qty -> production rate (% of full speed). Lower = more time per piece.
-RAMP_TABLE = [
-    (1,    0.50),
-    (10,   0.65),
-    (25,   0.80),
-    (50,   0.90),
-    (100,  1.00),
-    (1000, 1.00),
-]
-
-# ââ Batch Threshold âââââââââââââââââââââââââââââââââââââââââââââââââ
-BATCH_THRESHOLD_HR = 6.0
-BATCH_HANDLING = {
-    "laser":        0.20,
-    "water_jet":    0.20,
-    "brake_adira":  0.15,
-    "brake_guifil": 0.15,
-    "tig_weld":     0.20,
-}
-
-# ââ Second Operator Rules âââââââââââââââââââââââââââââââââââââââââââ
-SECOND_OP_WEIGHT_LB = 50
-SECOND_OP_SIZE_IN   = 60
-
-# ââ Material density (lb/in^3) for weight estimation ââââââââââââââââ
-DENSITY = {
-    "carbon_steel":    0.284,
-    "stainless_steel": 0.289,
-    "aluminum":        0.098,
-    "copper":          0.323,
-    "brass":           0.307,
-    "titanium":        0.163,
-}
+def get_default_config():
+    """Return a deep copy of the default config for seeding the database."""
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  Helper functions
 # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
+def _cfg(config, *keys):
+    """Walk into a config dict by key path, falling back to DEFAULT_CONFIG."""
+    obj = config or DEFAULT_CONFIG
+    for k in keys:
+        if isinstance(obj, dict) and k in obj:
+            obj = obj[k]
+        else:
+            # fall back to default
+            obj = DEFAULT_CONFIG
+            for k2 in keys:
+                obj = obj[k2]
+            return obj
+    return obj
+
 
 def _normalize_material(material_str):
     """Map user-facing material names to internal keys."""
@@ -159,43 +302,17 @@ def _normalize_material(material_str):
         return "acetal"
     if "wood" in m:
         return "wood"
-    return "carbon_steel"  # default
-
-MATERIAL_COST_PER_LB = {
-    "carbon_steel":    0.45,
-    "stainless_steel": 1.85,
-    "aluminum":        2.50,
-    "copper":          4.80,
-    "brass":           3.20,
-    "titanium":       12.00,
-    "uhmw":            1.60,
-    "acetal":          2.80,
-    "wood":            0.30,
-}
-
-HARDWARE_TIME_PER_INSERT = 0.015  # hr/insert
-HARDWARE_SETUP = 0.20
-TAP_TIME_PER_HOLE = {"small": 0.008, "medium": 0.012, "large": 0.018}
-TAP_SETUP = 0.20
-CSINK_TIME_PER_HOLE = 0.010
-CSINK_SETUP = 0.15
-PASSIVATION_TIME_PER_SQFT = 0.04
-PASSIVATION_SETUP = 0.35
-PASSIVATION_MIN_CHARGE = 0.25
-SAW_TIME_PER_CUT = {"carbon_steel": 0.05, "stainless_steel": 0.08, "aluminum": 0.03, "copper": 0.04, "brass": 0.04, "titanium": 0.12}
-PACKAGING_TIME_PER_PART = 0.005
-PACKAGING_SETUP = 0.15
-PACKAGING_RATE = 125.00
+    return "carbon_steel"
 
 
-def _get_ramp_factor(qty):
+def _get_ramp_factor(qty, config=None):
     """Interpolate production ramp factor for a given quantity."""
+    ramp_table = _cfg(config, "ramp_table")
     if qty <= 1:
-        return 0.50
-    prev_q, prev_r = 1, 0.50
-    for q, r in RAMP_TABLE:
+        return ramp_table[0][1] if ramp_table else 0.50
+    prev_q, prev_r = ramp_table[0]
+    for q, r in ramp_table:
         if qty <= q:
-            # linear interpolation
             frac = (qty - prev_q) / max(q - prev_q, 1)
             return prev_r + frac * (r - prev_r)
         prev_q, prev_r = q, r
@@ -207,33 +324,40 @@ def _find_nearest(table_keys, value):
     return min(table_keys, key=lambda k: abs(k - value))
 
 
-def _calc_batches(run_time_hr, handling_hr_per_batch):
+def _calc_batches(run_time_hr, handling_hr_per_batch, threshold=6.0):
     """Calculate number of batches and extra handling time."""
-    if run_time_hr <= BATCH_THRESHOLD_HR:
+    if run_time_hr <= threshold:
         return 1, 0.0
-    n_batches = max(1, int(run_time_hr / BATCH_THRESHOLD_HR))
+    n_batches = max(1, int(run_time_hr / threshold))
     extra = (n_batches - 1) * handling_hr_per_batch
     return n_batches, extra
 
 
-def _laser_can_cut(material, thickness_in):
+def _laser_can_cut(material, thickness_in, config=None):
     """Check if laser can cut this material/thickness."""
-    if material in ("carbon_steel", "stainless_steel"):
-        return thickness_in <= 1.0
-    return False  # plastics, wood, etc. -> water jet
+    capable = _cfg(config, "laser_capable")
+    max_t = capable.get(material)
+    if max_t is None:
+        return False
+    return thickness_in <= max_t
 
 
-def _get_laser_speed(material, thickness_in):
+def _get_laser_speed(material, thickness_in, config=None):
     """Get laser cutting speed in in/min for material and thickness."""
-    thicknesses = [t for (m, t) in LASER_SPEEDS if m == material]
-    if not thicknesses:
+    speeds = _cfg(config, "laser_speeds")
+    # Find all thicknesses for this material
+    prefix = material + "|"
+    mat_entries = {}
+    for k, v in speeds.items():
+        if k.startswith(prefix):
+            t = float(k.split("|")[1])
+            mat_entries[t] = v
+    if not mat_entries:
         return None
-    nearest = _find_nearest(thicknesses, thickness_in)
-    speed = LASER_SPEEDS.get((material, nearest))
-    # Scale for thickness difference if not exact match
+    nearest = _find_nearest(list(mat_entries.keys()), thickness_in)
+    speed = mat_entries[nearest]
     if speed and nearest != thickness_in and nearest > 0:
         ratio = nearest / thickness_in
-        # Thicker = slower, roughly linear for small differences
         if ratio > 1:
             speed = speed * min(ratio, 1.5)
         else:
@@ -241,14 +365,18 @@ def _get_laser_speed(material, thickness_in):
     return speed
 
 
-def _get_waterjet_speed(material, thickness_in, precision=False):
+def _get_waterjet_speed(material, thickness_in, precision=False, config=None):
     """Get water jet cutting speed in in/min."""
-    thicknesses = list(WATERJET_SPEEDS_STEEL.keys())
+    wj = _cfg(config, "waterjet_speeds")
+    thicknesses = [float(k) for k in wj.keys()]
     nearest = _find_nearest(thicknesses, thickness_in)
-    std, prec = WATERJET_SPEEDS_STEEL[nearest]
+    entry = wj[str(nearest)] if str(nearest) in wj else wj.get(f"{nearest:.3f}", [4.0, 2.0])
+    if isinstance(entry, list):
+        std, prec = entry[0], entry[1]
+    else:
+        std, prec = entry, entry * 0.5
     base = prec if precision else std
-    # Apply machinability index
-    mac = MACHINABILITY.get(material, 1.0)
+    mac = _cfg(config, "machinability").get(material, 1.0)
     return base * mac
 
 
@@ -256,28 +384,21 @@ def _get_waterjet_speed(material, thickness_in, precision=False):
 #  Main estimation function
 # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
-def estimate_cost(geometry, material_str, quantity=1):
+def estimate_cost(geometry, material_str, quantity=1, config=None):
     """
     Estimate fabrication cost from extracted geometry.
 
     Args:
-        geometry: dict with keys from STEP or PDF extraction:
-            - fab_type: "Sheet Metal" or "Machined"
-            - thickness_in: float (inches)
-            - dims: dict with length, width, height (inches)
-            - bend_count: int
-            - cut_perimeter_in: float (total cut perimeter in inches)
-            - flat_length_in, flat_width_in: float (developed flat dims)
-            - weight_lb: float (estimated weight)
-            - hole_count: int
-            - volume_in3: float
-            - weld_length_in: float (optional)
+        geometry: dict with keys from STEP or PDF extraction
         material_str: user-selected material string
         quantity: int, number of parts
+        config: optional config dict (from admin panel / SQLite).
+                If None, uses DEFAULT_CONFIG.
 
     Returns:
         dict with cost breakdown
     """
+    C = config or DEFAULT_CONFIG
     material = _normalize_material(material_str)
     fab_type = (geometry.get("fab_type") or "Sheet Metal").lower()
     thickness = geometry.get("thickness_in", 0.0) or 0.0
@@ -286,40 +407,43 @@ def estimate_cost(geometry, material_str, quantity=1):
     weight = geometry.get("weight_lb", 0.0) or 0.0
     bend_count = geometry.get("bend_count", 0) or 0
     cut_perim = geometry.get("cut_perimeter_in", 0.0) or 0.0
-    hole_count = geometry.get("hole_count", 0) or 0
     weld_length = geometry.get("weld_length_in", 0.0) or 0.0
 
-    ramp = _get_ramp_factor(quantity)
+    rates = _cfg(C, "rates")
+    setup_times = _cfg(C, "setup")
+
+    ramp = _get_ramp_factor(quantity, C)
     operations = []
     warnings = []
 
     # ââ Sheet Metal Path ââââââââââââââââââââââââââââââââââââââââ
     if "sheet" in fab_type or "sheet metal" in fab_type:
 
-        # 1. Cutting operation (laser vs water jet)
-        use_laser = _laser_can_cut(material, thickness)
+        use_laser = _laser_can_cut(material, thickness, C)
 
         if use_laser:
-            speed = _get_laser_speed(material, thickness)
+            speed = _get_laser_speed(material, thickness, C)
             if speed and cut_perim > 0:
                 cut_time_hr = (cut_perim / speed) / 60.0
             else:
-                cut_time_hr = 0.35  # fallback placeholder
+                cut_time_hr = 0.35
             op_key = "laser"
             op_name = "Laser Cut (HSG G4020X 12kW)"
         else:
-            speed = _get_waterjet_speed(material, thickness)
+            speed = _get_waterjet_speed(material, thickness, config=C)
             if speed and cut_perim > 0:
                 cut_time_hr = (cut_perim / speed) / 60.0
             else:
-                cut_time_hr = 0.60  # fallback placeholder
+                cut_time_hr = 0.60
             op_key = "water_jet"
             op_name = "Water Jet Cut (OMAX 60120)"
 
-        setup = SETUP[op_key]
-        rate = RATES[op_key]
+        setup = setup_times.get(op_key, 0.55)
+        rate = rates.get(op_key, 170.0)
         run_time = cut_time_hr / ramp * quantity
-        n_batch, batch_extra = _calc_batches(run_time, BATCH_HANDLING.get(op_key, 0.15))
+        batch_threshold = _cfg(C, "batch_threshold_hr")
+        batch_handling = _cfg(C, "batch_handling")
+        n_batch, batch_extra = _calc_batches(run_time, batch_handling.get(op_key, 0.15), batch_threshold)
         total_time = setup + run_time + batch_extra
         total_cost = total_time * rate
 
@@ -337,23 +461,26 @@ def estimate_cost(geometry, material_str, quantity=1):
             "total_cost": round(total_cost, 2),
         })
 
-        # 2. Bending (if bends detected)
+        # 2. Bending
         if bend_count > 0:
-            brake_key = "brake_adira"  # default to Adira (160 ton, larger)
+            brake_key = "brake_adira"
             brake_name = "Press Brake Form (Adira 160T)"
-            time_per_bend = BEND_TIME_PER_BEND[brake_key]
+            bend_times = _cfg(C, "bend_time_per_bend")
+            time_per_bend = bend_times.get(brake_key, 0.05)
             bend_cycle = time_per_bend * bend_count
             bend_run = bend_cycle / ramp * quantity
-            bend_setup = SETUP[brake_key]
-            n_b, b_extra = _calc_batches(bend_run, BATCH_HANDLING.get(brake_key, 0.15))
+            bend_setup = setup_times.get(brake_key, 0.55)
+            n_b, b_extra = _calc_batches(bend_run, batch_handling.get(brake_key, 0.15), batch_threshold)
             bend_total_time = bend_setup + bend_run + b_extra
-            bend_rate = RATES[brake_key]
+            bend_rate = rates.get(brake_key, 157.0)
             bend_cost = bend_total_time * bend_rate
 
-            # Second operator check
-            needs_2nd_op = weight > SECOND_OP_WEIGHT_LB or max_dim > SECOND_OP_SIZE_IN
+            second_op_weight = _cfg(C, "second_op_weight_lb")
+            second_op_size = _cfg(C, "second_op_size_in")
+            needs_2nd_op = weight > second_op_weight or max_dim > second_op_size
             if needs_2nd_op:
-                second_op_cost = bend_run * RATES["labor_only"]
+                labor_rate = rates.get("labor_only", 125.0)
+                second_op_cost = bend_run * labor_rate
                 bend_cost += second_op_cost
                 warnings.append(f"Second operator added for bending (weight {weight:.1f} lb or size {max_dim:.1f} in)")
             else:
@@ -375,25 +502,26 @@ def estimate_cost(geometry, material_str, quantity=1):
                 "total_cost": round(bend_cost, 2),
             })
 
-        # 3. Deburring (estimate based on part area)
+        # 3. Deburring
         flat_l = geometry.get("flat_length_in", 0) or 0
         flat_w = geometry.get("flat_width_in", 0) or 0
         if flat_l > 0 and flat_w > 0:
             area_sqft = (flat_l * flat_w) / 144.0
-            # Route: Apex for stainless <= 1/2" and <= 32" wide
-            if material == "stainless_steel" and thickness <= 0.5 and flat_w <= 32:
+            apex_max_t = _cfg(C, "deburr_apex_max_thickness")
+            apex_max_w = _cfg(C, "deburr_apex_max_width")
+            if material == "stainless_steel" and thickness <= apex_max_t and flat_w <= apex_max_w:
                 deburr_key = "deburr_apex"
                 deburr_name = "Apex Deburr (304 SS)"
-                deburr_cycle = 0.08 * area_sqft  # hr/sqft
+                deburr_cycle = _cfg(C, "deburr_apex_hr_per_sqft") * area_sqft
             else:
                 deburr_key = "deburr_hand"
                 deburr_name = "Hand Deburr"
-                deburr_cycle = 0.20  # hr/part flat rate
+                deburr_cycle = _cfg(C, "deburr_hand_hr_per_part")
 
             deburr_run = deburr_cycle / ramp * quantity
-            deburr_setup = SETUP.get(deburr_key, 0.25)
+            deburr_setup = setup_times.get(deburr_key, 0.25)
             deburr_total = deburr_setup + deburr_run
-            deburr_rate = RATES[deburr_key]
+            deburr_rate = rates.get(deburr_key, 125.0)
             deburr_cost = deburr_total * deburr_rate
 
             operations.append({
@@ -407,14 +535,14 @@ def estimate_cost(geometry, material_str, quantity=1):
                 "total_cost": round(deburr_cost, 2),
             })
 
-        # 4. Hardware insertion (PEM studs/nuts)
+        # 4. Hardware insertion
         hardware_count = geometry.get("hardware_count", 0) or 0
         if hardware_count > 0:
-            hw_cycle = HARDWARE_TIME_PER_INSERT * hardware_count
+            hw_cycle = _cfg(C, "hardware_time_per_insert") * hardware_count
             hw_run = hw_cycle / ramp * quantity
-            hw_setup = HARDWARE_SETUP
+            hw_setup = _cfg(C, "hardware_setup")
             hw_total = hw_setup + hw_run
-            hw_rate = RATES["labor_only"]
+            hw_rate = rates.get("labor_only", 125.0)
             hw_cost = hw_total * hw_rate
 
             operations.append({
@@ -433,11 +561,12 @@ def estimate_cost(geometry, material_str, quantity=1):
         tap_count = geometry.get("tap_count", 0) or 0
         if tap_count > 0:
             tap_size = geometry.get("tap_size_class", "medium")
-            tap_cycle = TAP_TIME_PER_HOLE.get(tap_size, 0.012) * tap_count
+            tap_times = _cfg(C, "tap_time_per_hole")
+            tap_cycle = tap_times.get(tap_size, 0.012) * tap_count
             tap_run = tap_cycle / ramp * quantity
-            tap_setup = TAP_SETUP
+            tap_setup = _cfg(C, "tap_setup")
             tap_total = tap_setup + tap_run
-            tap_rate = RATES["labor_only"]
+            tap_rate = rates.get("labor_only", 125.0)
             tap_cost = tap_total * tap_rate
 
             operations.append({
@@ -455,11 +584,11 @@ def estimate_cost(geometry, material_str, quantity=1):
         # 6. Countersinking
         csink_count = geometry.get("csink_count", 0) or 0
         if csink_count > 0:
-            cs_cycle = CSINK_TIME_PER_HOLE * csink_count
+            cs_cycle = _cfg(C, "csink_time_per_hole") * csink_count
             cs_run = cs_cycle / ramp * quantity
-            cs_setup = CSINK_SETUP
+            cs_setup = _cfg(C, "csink_setup")
             cs_total = cs_setup + cs_run
-            cs_rate = RATES["labor_only"]
+            cs_rate = rates.get("labor_only", 125.0)
             cs_cost = cs_total * cs_rate
 
             operations.append({
@@ -474,17 +603,18 @@ def estimate_cost(geometry, material_str, quantity=1):
                 "total_cost": round(cs_cost, 2),
             })
 
-        # 7. Passivation (stainless steel only, batch dip process)
+        # 7. Passivation (stainless steel only)
         if material == "stainless_steel":
             part_area_sqft = (flat_l * flat_w * 2) / 144.0 if flat_l > 0 and flat_w > 0 else 0.5
-            pass_cycle = max(PASSIVATION_TIME_PER_SQFT * part_area_sqft, PASSIVATION_MIN_CHARGE)
-            # Batch dip: ~50 parts per tank load, same soak time per batch
-            parts_per_batch = 50
-            n_pass_batches = max(1, -(-quantity // parts_per_batch))  # ceiling division
+            pass_rate_sqft = _cfg(C, "passivation_time_per_sqft")
+            pass_min = _cfg(C, "passivation_min_charge")
+            pass_cycle = max(pass_rate_sqft * part_area_sqft, pass_min)
+            parts_per_batch = _cfg(C, "passivation_parts_per_batch")
+            n_pass_batches = max(1, -(-quantity // parts_per_batch))
             pass_run = pass_cycle * n_pass_batches
-            pass_setup = PASSIVATION_SETUP
+            pass_setup = _cfg(C, "passivation_setup")
             pass_total = pass_setup + pass_run
-            pass_rate = RATES["passivation"]
+            pass_rate = rates.get("passivation", 125.0)
             pass_cost = pass_total * pass_rate
 
             operations.append({
@@ -503,12 +633,13 @@ def estimate_cost(geometry, material_str, quantity=1):
     elif "machin" in fab_type:
         volume_removed = geometry.get("volume_in3", 0.0) or 0.0
 
-        # 1. Sawing (bar stock cutoff)
-        saw_time = SAW_TIME_PER_CUT.get(material, 0.05)
+        # 1. Sawing
+        saw_times = _cfg(C, "saw_time_per_cut")
+        saw_time = saw_times.get(material, 0.05)
         saw_run = saw_time / ramp * quantity
-        saw_setup = SETUP["sawing"]
+        saw_setup = setup_times.get("sawing", 0.30)
         saw_total = saw_setup + saw_run
-        saw_rate = RATES["sawing"]
+        saw_rate = rates.get("sawing", 125.0)
         saw_cost = saw_total * saw_rate
 
         operations.append({
@@ -522,40 +653,34 @@ def estimate_cost(geometry, material_str, quantity=1):
             "total_cost": round(saw_cost, 2),
         })
 
-        # 2. CNC operation - Turning (if roughly cylindrical) or Milling
+        # 2. CNC operation
         l = dims.get("length", 0)
         w = dims.get("width", 0)
         h = dims.get("height", 0)
         sorted_dims = sorted([l, w, h], reverse=True)
-
         if sorted_dims[0] > 0 and sorted_dims[1] > 0:
             aspect = sorted_dims[0] / max(sorted_dims[1], 0.01)
         else:
             aspect = 1.0
 
-        # Simple heuristic: if longest dim is > 2x the other two, likely turned
         if aspect > 2.0 and max(sorted_dims[1], sorted_dims[2]) <= 12.5:
-            # Turning path (ST-30)
             op_key = "st30_turning"
             op_name = "CNC Turning (Haas ST-30)"
-            # MRR estimate: 304 SS at 250 SFM, 0.008 ipr, 0.075 DOC
-            mrr = 1.8  # in3/min rough average
-            if volume_removed > 0:
-                cycle = (volume_removed / mrr) / 60.0
-            else:
-                cycle = 0.25  # placeholder
+            mrr_table = _cfg(C, "mrr_turning")
+            mrr = mrr_table.get(material, 1.8)
         else:
-            # Milling path (TM-2P)
             op_key = "tm2p_milling"
             op_name = "CNC Milling (Haas TM-2P)"
-            mrr = 0.8  # in3/min rough average for 304 SS milling
-            if volume_removed > 0:
-                cycle = (volume_removed / mrr) / 60.0
-            else:
-                cycle = 0.30  # placeholder
+            mrr_table = _cfg(C, "mrr_milling")
+            mrr = mrr_table.get(material, 0.8)
 
-        setup = SETUP[op_key]
-        rate = RATES[op_key]
+        if volume_removed > 0 and mrr > 0:
+            cycle = (volume_removed / mrr) / 60.0
+        else:
+            cycle = 0.25
+
+        setup = setup_times.get(op_key, 0.65)
+        rate = rates.get(op_key, 150.0)
         run_time = cycle / ramp * quantity
         total_time = setup + run_time
         total_cost = total_time * rate
@@ -571,16 +696,17 @@ def estimate_cost(geometry, material_str, quantity=1):
             "total_cost": round(total_cost, 2),
         })
 
-    # ââ Welding (if weld length provided) âââââââââââââââââââââââ
+    # ââ Welding âââââââââââââââââââââââââââââââââââââââââââââââââ
     if weld_length > 0:
         weld_method = "tig"
         weld_key = "tig_weld"
         weld_name = "TIG Weld (default)"
-        weld_cycle = WELD_RATES[weld_method] * weld_length
+        weld_rates_cfg = _cfg(C, "weld_rates")
+        weld_cycle = weld_rates_cfg.get(weld_method, 0.01058) * weld_length
         weld_run = weld_cycle / ramp * quantity
-        weld_setup = SETUP[weld_key]
+        weld_setup = setup_times.get(weld_key, 0.30)
         weld_total = weld_setup + weld_run
-        weld_rate = RATES[weld_key]
+        weld_rate = rates.get(weld_key, 131.0)
         weld_cost = weld_total * weld_rate
 
         operations.append({
@@ -595,17 +721,18 @@ def estimate_cost(geometry, material_str, quantity=1):
             "total_cost": round(weld_cost, 2),
         })
 
-    # -- Material Cost --------------------------------------------------
-    mat_cost_per_lb = MATERIAL_COST_PER_LB.get(material, 0.50)
+    # ââ Material Cost ââââââââââââââââââââââââââââââââââââââââââ
+    mat_costs = _cfg(C, "material_cost_per_lb")
+    mat_cost_per_lb = mat_costs.get(material, 0.50)
+    scrap_pct = _cfg(C, "scrap_allowance_pct")
     if weight > 0:
-        # Add 15% scrap/kerf allowance
-        mat_weight = weight * 1.15
+        mat_weight = weight * (1 + scrap_pct / 100.0)
         mat_cost_total = mat_cost_per_lb * mat_weight * quantity
         operations.append({
             "operation": "Raw Material",
             "op_key": "material",
             "weight_lb": round(weight, 3),
-            "scrap_allowance": "15%",
+            "scrap_allowance": f"{scrap_pct}%",
             "cost_per_lb": mat_cost_per_lb,
             "cycle_time_hr": 0,
             "setup_hr": 0,
@@ -615,12 +742,13 @@ def estimate_cost(geometry, material_str, quantity=1):
             "total_cost": round(mat_cost_total, 2),
         })
 
-    # -- Packaging / Final Inspection ------------------------------------
-    pkg_cycle = PACKAGING_TIME_PER_PART
-    pkg_run = pkg_cycle * quantity  # no ramp - constant per part
-    pkg_setup = PACKAGING_SETUP
+    # ââ Packaging / Final Inspection âââââââââââââââââââââââââââ
+    pkg_cycle = _cfg(C, "packaging_time_per_part")
+    pkg_run = pkg_cycle * quantity
+    pkg_setup = _cfg(C, "packaging_setup")
     pkg_total = pkg_setup + pkg_run
-    pkg_cost = pkg_total * PACKAGING_RATE
+    pkg_rate = _cfg(C, "packaging_rate")
+    pkg_cost = pkg_total * pkg_rate
 
     operations.append({
         "operation": "Packaging & Inspection",
@@ -629,7 +757,7 @@ def estimate_cost(geometry, material_str, quantity=1):
         "setup_hr": round(pkg_setup, 2),
         "run_time_hr": round(pkg_run, 4),
         "total_time_hr": round(pkg_total, 4),
-        "rate_per_hr": PACKAGING_RATE,
+        "rate_per_hr": pkg_rate,
         "total_cost": round(pkg_cost, 2),
     })
 
@@ -649,7 +777,7 @@ def estimate_cost(geometry, material_str, quantity=1):
                 "selected": True,
             })
         else:
-            qb = estimate_cost_simple(geometry, material_str, qty)
+            qb = estimate_cost_simple(geometry, material_str, qty, config=C)
             qty_breaks.append({
                 "qty": qty,
                 "total_cost": round(qb["total_cost"], 2),
@@ -672,11 +800,9 @@ def estimate_cost(geometry, material_str, quantity=1):
     }
 
 
-def estimate_cost_simple(geometry, material_str, quantity=1):
-    """
-    Wrapper that computes cost without recursive qty_breaks.
-    Used internally to avoid infinite recursion in qty break calculation.
-    """
+def estimate_cost_simple(geometry, material_str, quantity=1, config=None):
+    """Simplified cost calc for quantity break table (no recursion)."""
+    C = config or DEFAULT_CONFIG
     material = _normalize_material(material_str)
     fab_type = (geometry.get("fab_type") or "Sheet Metal").lower()
     thickness = geometry.get("thickness_in", 0.0) or 0.0
@@ -687,118 +813,142 @@ def estimate_cost_simple(geometry, material_str, quantity=1):
     cut_perim = geometry.get("cut_perimeter_in", 0.0) or 0.0
     weld_length = geometry.get("weld_length_in", 0.0) or 0.0
 
-    ramp = _get_ramp_factor(quantity)
+    rates = _cfg(C, "rates")
+    setup_times = _cfg(C, "setup")
+    ramp = _get_ramp_factor(quantity, C)
     total_cost = 0.0
     total_time = 0.0
+    batch_threshold = _cfg(C, "batch_threshold_hr")
+    batch_handling = _cfg(C, "batch_handling")
 
     if "sheet" in fab_type or "sheet metal" in fab_type:
-        use_laser = _laser_can_cut(material, thickness)
+        use_laser = _laser_can_cut(material, thickness, C)
         if use_laser:
-            speed = _get_laser_speed(material, thickness)
+            speed = _get_laser_speed(material, thickness, C)
             cut_time = (cut_perim / speed / 60.0) if speed and cut_perim > 0 else 0.35
             op_key = "laser"
         else:
-            speed = _get_waterjet_speed(material, thickness)
+            speed = _get_waterjet_speed(material, thickness, config=C)
             cut_time = (cut_perim / speed / 60.0) if speed and cut_perim > 0 else 0.60
             op_key = "water_jet"
 
         run = cut_time / ramp * quantity
-        _, batch_extra = _calc_batches(run, BATCH_HANDLING.get(op_key, 0.15))
-        t = SETUP[op_key] + run + batch_extra
+        _, b_extra = _calc_batches(run, batch_handling.get(op_key, 0.15), batch_threshold)
+        t = setup_times.get(op_key, 0.55) + run + b_extra
         total_time += t
-        total_cost += t * RATES[op_key]
+        total_cost += t * rates.get(op_key, 170.0)
 
         if bend_count > 0:
             bk = "brake_adira"
-            bc = BEND_TIME_PER_BEND[bk] * bend_count
+            bend_times = _cfg(C, "bend_time_per_bend")
+            bc = bend_times.get(bk, 0.05) * bend_count
             br = bc / ramp * quantity
-            _, be = _calc_batches(br, 0.15)
-            bt = SETUP[bk] + br + be
+            _, be = _calc_batches(br, 0.15, batch_threshold)
+            bt = setup_times.get(bk, 0.55) + br + be
             total_time += bt
-            total_cost += bt * RATES[bk]
-            if weight > SECOND_OP_WEIGHT_LB or max_dim > SECOND_OP_SIZE_IN:
-                total_cost += br * RATES["labor_only"]
+            total_cost += bt * rates.get(bk, 157.0)
+            second_op_weight = _cfg(C, "second_op_weight_lb")
+            second_op_size = _cfg(C, "second_op_size_in")
+            if weight > second_op_weight or max_dim > second_op_size:
+                total_cost += br * rates.get("labor_only", 125.0)
 
-        # Deburr (sheet metal)
         flat_l = geometry.get("flat_length_in", 0) or 0
         flat_w = geometry.get("flat_width_in", 0) or 0
         if flat_l > 0 and flat_w > 0:
-            if material == "stainless_steel" and thickness <= 0.5 and flat_w <= 32:
-                dc = 0.08 * (flat_l * flat_w) / 144.0
+            apex_max_t = _cfg(C, "deburr_apex_max_thickness")
+            apex_max_w = _cfg(C, "deburr_apex_max_width")
+            if material == "stainless_steel" and thickness <= apex_max_t and flat_w <= apex_max_w:
+                dc = _cfg(C, "deburr_apex_hr_per_sqft") * (flat_l * flat_w) / 144.0
             else:
-                dc = 0.20
+                dc = _cfg(C, "deburr_hand_hr_per_part")
             dr = dc / ramp * quantity
-            dt = SETUP.get("deburr_apex", 0.25) + dr
+            dt = setup_times.get("deburr_apex", 0.25) + dr
             total_time += dt
-            total_cost += dt * RATES.get("deburr_apex", 125.76)
+            total_cost += dt * rates.get("deburr_apex", 125.76)
 
-        # Hardware insertion
         hw = geometry.get("hardware_count", 0) or 0
         if hw > 0:
-            hr_ = HARDWARE_TIME_PER_INSERT * hw / ramp * quantity
-            ht = HARDWARE_SETUP + hr_
+            hr_ = _cfg(C, "hardware_time_per_insert") * hw / ramp * quantity
+            ht = _cfg(C, "hardware_setup") + hr_
             total_time += ht
-            total_cost += ht * RATES["labor_only"]
+            total_cost += ht * rates.get("labor_only", 125.0)
 
-        # Tapping
         tc = geometry.get("tap_count", 0) or 0
         if tc > 0:
-            tr_ = TAP_TIME_PER_HOLE["medium"] * tc / ramp * quantity
-            tt = TAP_SETUP + tr_
+            tap_times = _cfg(C, "tap_time_per_hole")
+            tr_ = tap_times.get("medium", 0.012) * tc / ramp * quantity
+            tt = _cfg(C, "tap_setup") + tr_
             total_time += tt
-            total_cost += tt * RATES["labor_only"]
+            total_cost += tt * rates.get("labor_only", 125.0)
 
-        # Countersinking
         cc = geometry.get("csink_count", 0) or 0
         if cc > 0:
-            cr_ = CSINK_TIME_PER_HOLE * cc / ramp * quantity
-            ct = CSINK_SETUP + cr_
+            cr_ = _cfg(C, "csink_time_per_hole") * cc / ramp * quantity
+            ct = _cfg(C, "csink_setup") + cr_
             total_time += ct
-            total_cost += ct * RATES["labor_only"]
+            total_cost += ct * rates.get("labor_only", 125.0)
 
-        # Passivation (stainless, batch dip)
         if material == "stainless_steel":
-            pa = max(PASSIVATION_TIME_PER_SQFT * 0.5, PASSIVATION_MIN_CHARGE)
-            n_pb = max(1, -(-quantity // 50))
+            pass_rate_sqft = _cfg(C, "passivation_time_per_sqft")
+            pass_min = _cfg(C, "passivation_min_charge")
+            pa = max(pass_rate_sqft * 0.5, pass_min)
+            ppb = _cfg(C, "passivation_parts_per_batch")
+            n_pb = max(1, -(-quantity // ppb))
             pr_ = pa * n_pb
-            pt = PASSIVATION_SETUP + pr_
+            pt = _cfg(C, "passivation_setup") + pr_
             total_time += pt
-            total_cost += pt * RATES["passivation"]
+            total_cost += pt * rates.get("passivation", 125.0)
 
     elif "machin" in fab_type:
-        # Sawing
-        st_ = SAW_TIME_PER_CUT.get(material, 0.05)
+        saw_times = _cfg(C, "saw_time_per_cut")
+        st_ = saw_times.get(material, 0.05)
         sr_ = st_ / ramp * quantity
-        s_total = SETUP["sawing"] + sr_
+        s_total = setup_times.get("sawing", 0.30) + sr_
         total_time += s_total
-        total_cost += s_total * RATES["sawing"]
+        total_cost += s_total * rates.get("sawing", 125.0)
 
-        # CNC
         volume = geometry.get("volume_in3", 0.0) or 0.0
-        cycle = max((volume / 1.8 / 60.0), 0.25) if volume > 0 else 0.25
-        op_key = "st30_turning"
+        l = dims.get("length", 0)
+        w = dims.get("width", 0)
+        h = dims.get("height", 0)
+        sorted_dims = sorted([l, w, h], reverse=True)
+        if sorted_dims[0] > 0 and sorted_dims[1] > 0:
+            aspect = sorted_dims[0] / max(sorted_dims[1], 0.01)
+        else:
+            aspect = 1.0
+
+        if aspect > 2.0 and max(sorted_dims[1], sorted_dims[2]) <= 12.5:
+            op_key = "st30_turning"
+            mrr = _cfg(C, "mrr_turning").get(material, 1.8)
+        else:
+            op_key = "tm2p_milling"
+            mrr = _cfg(C, "mrr_milling").get(material, 0.8)
+
+        cycle = max((volume / mrr / 60.0), 0.25) if volume > 0 and mrr > 0 else 0.25
         run = cycle / ramp * quantity
-        t = SETUP[op_key] + run
+        t = setup_times.get(op_key, 0.65) + run
         total_time += t
-        total_cost += t * RATES[op_key]
+        total_cost += t * rates.get(op_key, 150.0)
 
     if weld_length > 0:
-        wc = WELD_RATES["tig"] * weld_length
+        weld_rates_cfg = _cfg(C, "weld_rates")
+        wc = weld_rates_cfg.get("tig", 0.01058) * weld_length
         wr = wc / ramp * quantity
-        wt = SETUP["tig_weld"] + wr
+        wt = setup_times.get("tig_weld", 0.30) + wr
         total_time += wt
-        total_cost += wt * RATES["tig_weld"]
+        total_cost += wt * rates.get("tig_weld", 131.0)
 
-    # Material cost
-    mat_cpl = MATERIAL_COST_PER_LB.get(material, 0.50)
+    mat_costs = _cfg(C, "material_cost_per_lb")
+    mat_cpl = mat_costs.get(material, 0.50)
+    scrap_pct = _cfg(C, "scrap_allowance_pct")
     if weight > 0:
-        total_cost += mat_cpl * weight * 1.15 * quantity
+        total_cost += mat_cpl * weight * (1 + scrap_pct / 100.0) * quantity
 
-    # Packaging
-    pkg_r = PACKAGING_TIME_PER_PART * quantity
-    pkg_t = PACKAGING_SETUP + pkg_r
+    pkg_rate = _cfg(C, "packaging_rate")
+    pkg_r = _cfg(C, "packaging_time_per_part") * quantity
+    pkg_t = _cfg(C, "packaging_setup") + pkg_r
     total_time += pkg_t
-    total_cost += pkg_t * PACKAGING_RATE
+    total_cost += pkg_t * pkg_rate
 
     unit_cost = total_cost / max(quantity, 1)
     return {"total_cost": round(total_cost, 2), "unit_cost": round(unit_cost, 2), "total_time_hr": round(total_time, 4)}
