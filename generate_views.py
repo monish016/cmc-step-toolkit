@@ -46,7 +46,8 @@ def render_views(step_path, outdir="views"):
         exporters.export(
             shape, svg_path, exportType="SVG",
             opt={"projectionDir": opts["projectionDir"], "width": opts["width"],
-                 "height": opts["height"], "showAxes": False, "strokeWidth": 0.3},
+                 "height": opts["height"], "showAxes": False, "strokeWidth": 1.5,
+                  "strokeColor": (0, 0, 0)},
         )
         cairosvg.svg2png(url=svg_path, write_to=png_path, scale=2, background_color="white")
         autocrop(png_path)
