@@ -740,6 +740,17 @@ def detect_bend_faces(cyl, thickness_hint=None):
             "face_idx": [i for i, _ in group],
         })
 
+    # Filter out false bends: groups where inner == outer radius (thickness ~ 0)
+    # are standalone cylinders or same-radius pairs, not real inner/outer bend pairs.
+    # Keep only bends with measurable thickness (> 0.5mm).
+    real_bends = [b for b in bend_lines if b["thickness"] > 0.5]
+    if not real_bends and bend_lines:
+        # All bends have zero thickness -- fallback: use the original list
+        # and estimate thickness from the smallest cylinder v_len
+        real_bends = bend_lines
+    else:
+        bend_lines = real_bends
+
     thickness_mm = sum(b["thickness"] for b in bend_lines) / len(bend_lines) if bend_lines else thickness_est
     bend_radius_mm = sum(b["inner_radius"] for b in bend_lines) / len(bend_lines) if bend_lines else None
 
@@ -1300,43 +1311,90 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     looked_up_k, matched_br, k_source = lookup_k_factor(thickness_in, bend_radius_in, material)
     k_factor = looked_up_k  # override default with table value
 
-    axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
     bb = envelope["bbox_mm"]
     center = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
+    env_dims_mm = [bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"], bb["zmax"]-bb["zmin"]]
+    max_env_mm = max(env_dims_mm)
 
-    # Multi-cut: try several cross-section positions along the bend axis
-    # to avoid cutting through holes/slots which fragment the profile.
-    def _proj_axis(pt):
-        return sum(pt[k]*axis_dir[k] for k in range(3))
+    # Collect all unique bend axis directions to try
+    axes_to_try = []
+    if bend_lines:
+        # Start with dominant axis
+        dom_axis = dominant_bend_axis(bend_lines)
+        axes_to_try.append(dom_axis)
+        # Collect other unique axes
+        seen_keys = set()
+        seen_keys.add(tuple(round(abs(c), 1) for c in dom_axis))
+        for b in bend_lines:
+            key = tuple(round(abs(c), 1) for c in b["axis"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                axes_to_try.append(b["axis"])
+    else:
+        axes_to_try = [(1, 0, 0)]
 
-    proj_center = _proj_axis(center)
-    corners_bb = [(bb["xmin"] if i&1 else bb["xmax"],
-                   bb["ymin"] if i&2 else bb["ymax"],
-                   bb["zmin"] if i&4 else bb["zmax"]) for i in range(8)]
-    proj_min_bb = min(_proj_axis(c) for c in corners_bb)
-    proj_max_bb = max(_proj_axis(c) for c in corners_bb)
-    axis_span = proj_max_bb - proj_min_bb
-
+    # Multi-cut across all axes: try several cross-section positions along each
+    # bend axis to find the one that gives the largest developed width.
     best_layout, best_flat_width_mm = [], 0.0
     best_cut_point = center
-    for frac in [0.05, 0.15, 0.25, 0.5, 0.75, 0.85, 0.95]:
-        offset = proj_min_bb + frac * axis_span - proj_center
-        cp = tuple(center[k] + offset * axis_dir[k] for k in range(3))
-        try:
-            edges = cut_cross_section(solid, axis_dir, cp)
-            edges_info = [edge_2d_info(e, axis_dir) for e in edges]
-            chain = walk_closed_loop(edges_info, thickness_mm)
-            layout_candidate, fw = build_flat_layout(
-                chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
-            if fw > best_flat_width_mm:
-                best_flat_width_mm = fw
-                best_layout = layout_candidate
-                best_cut_point = cp
-        except Exception:
-            pass
+    axis_dir = axes_to_try[0]  # default
+
+    for try_axis in axes_to_try:
+        def _proj_axis(pt, ax=try_axis):
+            return sum(pt[k]*ax[k] for k in range(3))
+
+        proj_center = _proj_axis(center)
+        corners_bb = [(bb["xmin"] if i&1 else bb["xmax"],
+                       bb["ymin"] if i&2 else bb["ymax"],
+                       bb["zmin"] if i&4 else bb["zmax"]) for i in range(8)]
+        proj_min_bb = min(_proj_axis(c) for c in corners_bb)
+        proj_max_bb = max(_proj_axis(c) for c in corners_bb)
+        axis_span = proj_max_bb - proj_min_bb
+        if axis_span < 1e-6:
+            continue
+
+        for frac in [0.05, 0.15, 0.25, 0.5, 0.75, 0.85, 0.95]:
+            offset = proj_min_bb + frac * axis_span - proj_center
+            cp = tuple(center[k] + offset * try_axis[k] for k in range(3))
+            try:
+                edges = cut_cross_section(solid, try_axis, cp)
+                edges_info = [edge_2d_info(e, try_axis) for e in edges]
+                chain = walk_closed_loop(edges_info, thickness_mm)
+                layout_candidate, fw = build_flat_layout(
+                    chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
+                if fw > best_flat_width_mm:
+                    best_flat_width_mm = fw
+                    best_layout = layout_candidate
+                    best_cut_point = cp
+                    axis_dir = try_axis
+            except Exception:
+                pass
 
     layout, flat_width_mm = best_layout, best_flat_width_mm
     cut_point = best_cut_point
+
+    # Fallback: if cross-section walk gives unreasonably small result,
+    # estimate flat width from envelope + bend deductions
+    if flat_width_mm < max_env_mm * 0.7 and bend_lines:
+        print(f"Warning: Cross-section flat width {flat_width_mm:.1f}mm < 70% of envelope {max_env_mm:.1f}mm, using bend deduction estimate")
+        # Estimate: sum the two largest envelope dims (unfolded flanges) minus bend deductions
+        sorted_dims = sorted(env_dims_mm, reverse=True)
+        total_bd = 0.0
+        br_mm = bend_radius_mm or thickness_mm
+        for b in bend_lines:
+            angle_rad = math.radians(b["angle_deg"])
+            ba = (br_mm + k_factor * thickness_mm) * angle_rad
+            ossb = (br_mm + thickness_mm) * math.tan(angle_rad / 2) if angle_rad < math.pi else 0
+            total_bd += 2 * ossb - ba  # bend deduction per bend
+        # Flat width ~ largest dim + second largest dim - total bend deductions
+        # (rough estimate assuming flanges fold from the two larger dimensions)
+        est_mm = sorted_dims[0] + sorted_dims[2] * 2 - total_bd
+        if est_mm > flat_width_mm:
+            flat_width_mm = est_mm
+            # Build a simple layout with flat segments and bend placeholders
+            layout = [{"kind": "flat", "start": 0, "end": flat_width_mm,
+                       "p0": (0, 0), "p1": (flat_width_mm, 0)}]
+
     if flat_width_mm == 0.0:
         print("Warning: All cross-section cuts failed for flat layout")
 
