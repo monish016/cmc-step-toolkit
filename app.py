@@ -88,7 +88,49 @@ def _get_jobs(limit=200):
 
 
 # Initialise DB at import time (runs once per gunicorn worker)
+
+def _init_config_db():
+    """Create the shop_config table if it doesn't exist."""
+    conn = _get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shop_config (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            config_json TEXT NOT NULL,
+            updated_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _get_config():
+    """Return the saved shop config dict, or DEFAULT_CONFIG if none saved."""
+    conn = _get_db()
+    row = conn.execute("SELECT config_json FROM shop_config WHERE id = 1").fetchone()
+    conn.close()
+    if row:
+        try:
+            return json.loads(row["config_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return cost_engine.get_default_config()
+
+
+def _save_config(config_dict):
+    """Save or update the shop config in SQLite."""
+    conn = _get_db()
+    conn.execute("""
+        INSERT INTO shop_config (id, config_json, updated_at)
+        VALUES (1, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = datetime('now')
+    """, (json.dumps(config_dict),))
+    conn.commit()
+    conn.close()
+
+
+# Initialise DB at import time (runs once per gunicorn worker)
 _init_db()
+_init_config_db()
 
 
 def allowed_file(filename):
@@ -276,6 +318,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .tab-content { display: none; }
   .tab-content.active { display: block; }
   .footer { text-align: center; padding: 2rem; font-size: 0.8rem; color: #999; }
+  /* Shop Rates config panel */
+  .cfg-section { margin-bottom: 1.5rem; }
+  .cfg-section h3 { font-size: 0.95rem; color: #1a3a1a; margin-bottom: 0.5rem; cursor: pointer; padding: 0.5rem 0.7rem; background: #f0f7f0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
+  .cfg-section h3:hover { background: #e0efe0; }
+  .cfg-section h3 .toggle { font-size: 0.7rem; color: #888; }
+  .cfg-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .cfg-table th { text-align: left; padding: 0.4rem 0.6rem; background: #f8f8f8; border-bottom: 1px solid #ddd; font-weight: 600; color: #555; }
+  .cfg-table td { padding: 0.3rem 0.6rem; border-bottom: 1px solid #eee; }
+  .cfg-table td:first-child { font-weight: 500; color: #333; min-width: 200px; }
+  .cfg-table input { width: 100px; padding: 0.25rem 0.4rem; border: 1px solid #ccc; border-radius: 3px; font-size: 0.82rem; text-align: right; }
+  .cfg-table input:focus { border-color: #1a3a1a; outline: none; box-shadow: 0 0 0 2px rgba(26,58,26,0.15); }
+  .cfg-table input.changed { background: #fffbe6; border-color: #c0a000; }
   @media (max-width: 600px) {
     .geo-grid { grid-template-columns: 1fr 1fr; }
     .view-grid { grid-template-columns: 1fr; }
@@ -296,6 +350,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="tab-bar">
     <div class="tab active" onclick="switchTab('upload')">Upload &amp; Analyze</div>
     <div class="tab" onclick="switchTab('history')">Recent Jobs <span id="historyCount"></span></div>
+    <div class="tab" onclick="switchTab('config')">Shop Rates</div>
   </div>
 
   <!-- Upload Tab -->
@@ -359,8 +414,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Shop Rates Config Tab -->
+  <div class="tab-content" id="tab-config">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+        <h2 style="margin:0">Shop Rates &amp; Cost Parameters</h2>
+        <div style="display:flex;gap:0.5rem;">
+          <button class="btn" id="cfgSaveBtn" onclick="saveConfig()" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;">Save Changes</button>
+          <button class="btn" id="cfgResetBtn" onclick="resetConfig()" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#8a1a1a;">Reset Defaults</button>
+        </div>
+      </div>
+      <div id="cfgStatus" style="display:none;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem;font-size:0.85rem;"></div>
+      <p style="font-size:0.82rem;color:#666;margin-bottom:1.2rem;">Edit any value below. Changes are saved to the server and used for all future cost estimates. No code changes required.</p>
+      <div id="cfgContent"><div class="empty-state">Loading configuration...</div></div>
+    </div>
+  </div>
+
 </div>
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.1</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.2</div>
 
 <script>
 // --- Tab switching ---
@@ -370,6 +441,7 @@ function switchTab(name) {
   event.target.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'history') loadHistory();
+  if (name === 'config') loadConfig();
 }
 
 // --- File management ---
@@ -1135,6 +1207,258 @@ async function loadHistory() {
 
 // Load history on page load
 loadHistory();
+
+// ============================================================
+//  Shop Rates Config Panel
+// ============================================================
+
+var shopConfig = null;
+var configLoaded = false;
+
+var CFG_SECTIONS = {
+  rates: {label: "Machine Rates ($/hr)", unit: "$/hr"},
+  setup: {label: "Setup Times (hr)", unit: "hr"},
+  laser_speeds: {label: "Laser Cut Speeds (IPM)", unit: "IPM", note: "Format: material|thickness"},
+  laser_capable: {label: "Laser Capable Materials (max thickness in)", unit: "in"},
+  waterjet_speeds: {label: "Water Jet Speeds (IPM)", unit: "IPM", note: "Values are [standard, precision]", readonly: true},
+  machinability: {label: "Machinability Index (carbon steel = 1.0)", unit: "index"},
+  bend_time_per_bend: {label: "Bend Time per Bend (hr)", unit: "hr"},
+  weld_rates: {label: "Weld Rates (hr per weld-inch)", unit: "hr/in"},
+  batch_handling: {label: "Batch Handling Time (hr)", unit: "hr"},
+  density: {label: "Material Density (lb/in3)", unit: "lb/in3"},
+  material_cost_per_lb: {label: "Raw Material Cost ($/lb)", unit: "$/lb"},
+  tap_time_per_hole: {label: "Tapping Time per Hole (hr)", unit: "hr"},
+  saw_time_per_cut: {label: "Saw Time per Cut (hr)", unit: "hr"},
+  mrr_turning: {label: "CNC Turning MRR (in3/min)", unit: "in3/min"},
+  mrr_milling: {label: "CNC Milling MRR (in3/min)", unit: "in3/min"},
+};
+
+var CFG_SCALARS = {
+  hardware_time_per_insert: {label: "Hardware insertion time (hr per insert)", unit: "hr"},
+  hardware_setup: {label: "Hardware setup time (hr)", unit: "hr"},
+  tap_setup: {label: "Tap setup time (hr)", unit: "hr"},
+  csink_time_per_hole: {label: "Countersink time per hole (hr)", unit: "hr"},
+  csink_setup: {label: "Countersink setup time (hr)", unit: "hr"},
+  passivation_time_per_sqft: {label: "Passivation time per sqft (hr)", unit: "hr"},
+  passivation_setup: {label: "Passivation setup time (hr)", unit: "hr"},
+  passivation_min_charge: {label: "Passivation min charge (hr)", unit: "hr"},
+  passivation_parts_per_batch: {label: "Passivation parts per batch", unit: "count"},
+  deburr_apex_hr_per_sqft: {label: "Deburr (Apex) time per sqft (hr)", unit: "hr"},
+  deburr_hand_hr_per_part: {label: "Deburr (hand) time per part (hr)", unit: "hr"},
+  deburr_apex_max_thickness: {label: "Deburr Apex max thickness (in)", unit: "in"},
+  deburr_apex_max_width: {label: "Deburr Apex max width (in)", unit: "in"},
+  packaging_time_per_part: {label: "Packaging time per part (hr)", unit: "hr"},
+  packaging_setup: {label: "Packaging setup time (hr)", unit: "hr"},
+  packaging_rate: {label: "Packaging labor rate ($/hr)", unit: "$/hr"},
+  batch_threshold_hr: {label: "Batch handling threshold (hr)", unit: "hr"},
+  second_op_weight_lb: {label: "Second operator weight threshold (lb)", unit: "lb"},
+  second_op_size_in: {label: "Second operator size threshold (in)", unit: "in"},
+  scrap_allowance_pct: {label: "Scrap allowance (%)", unit: "%"},
+  minimum_order_charge: {label: "Minimum order charge ($)", unit: "$"},
+  rush_premium_pct: {label: "Rush premium (%)", unit: "%"},
+  material_markup_pct: {label: "Material markup (%)", unit: "%"},
+  shop_markup_pct: {label: "Shop markup (%)", unit: "%"},
+};
+
+function formatKey(k) {
+  return k.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+}
+
+function loadConfig() {
+  if (configLoaded) return;
+  fetch('/config').then(function(r) { return r.json(); }).then(function(cfg) {
+    shopConfig = cfg;
+    configLoaded = true;
+    renderConfig(cfg);
+  }).catch(function(err) {
+    document.getElementById('cfgContent').innerHTML = '<div class="empty-state">Failed to load config: ' + err + '</div>';
+  });
+}
+
+function renderConfig(cfg) {
+  var html = '';
+
+  // Dict sections (machine rates, laser speeds, etc.)
+  var sectionKeys = Object.keys(CFG_SECTIONS);
+  for (var si = 0; si < sectionKeys.length; si++) {
+    var skey = sectionKeys[si];
+    var sec = CFG_SECTIONS[skey];
+    var data = cfg[skey];
+    if (!data || typeof data !== 'object') continue;
+    if (sec.readonly) {
+      // Show read-only for complex types like waterjet [standard, precision]
+      html += '<div class="cfg-section">';
+      html += '<h3 onclick="toggleSection(this)">' + sec.label + ' <span class="toggle">click to expand</span></h3>';
+      html += '<div class="cfg-body" style="display:none;">';
+      if (sec.note) html += '<div style="font-size:0.75rem;color:#888;margin-bottom:0.4rem;">' + sec.note + '</div>';
+      html += '<table class="cfg-table"><tr><th>Key</th><th>Value</th></tr>';
+      var dk = Object.keys(data);
+      for (var i = 0; i < dk.length; i++) {
+        html += '<tr><td>' + formatKey(dk[i]) + '</td><td>' + JSON.stringify(data[dk[i]]) + '</td></tr>';
+      }
+      html += '</table></div></div>';
+      continue;
+    }
+    html += '<div class="cfg-section">';
+    html += '<h3 onclick="toggleSection(this)">' + sec.label + ' <span class="toggle">click to expand</span></h3>';
+    html += '<div class="cfg-body" style="display:none;">';
+    if (sec.note) html += '<div style="font-size:0.75rem;color:#888;margin-bottom:0.4rem;">' + sec.note + '</div>';
+    html += '<table class="cfg-table"><tr><th>Parameter</th><th>Value (' + sec.unit + ')</th></tr>';
+    var keys = Object.keys(data);
+    for (var i = 0; i < keys.length; i++) {
+      var v = data[keys[i]];
+      if (typeof v === 'number') {
+        html += '<tr><td>' + formatKey(keys[i]) + '</td>';
+        html += '<td><input type="number" step="any" data-section="' + skey + '" data-key="' + keys[i] + '" value="' + v + '" onchange="markChanged(this)"></td></tr>';
+      }
+    }
+    html += '</table></div></div>';
+  }
+
+  // Scalar values section
+  html += '<div class="cfg-section">';
+  html += '<h3 onclick="toggleSection(this)">Other Parameters <span class="toggle">click to expand</span></h3>';
+  html += '<div class="cfg-body" style="display:none;">';
+  html += '<table class="cfg-table"><tr><th>Parameter</th><th>Value</th></tr>';
+  var scalarKeys = Object.keys(CFG_SCALARS);
+  for (var i = 0; i < scalarKeys.length; i++) {
+    var sk = scalarKeys[i];
+    var sv = cfg[sk];
+    if (typeof sv === 'number') {
+      var info = CFG_SCALARS[sk];
+      html += '<tr><td>' + info.label + '</td>';
+      html += '<td><input type="number" step="any" data-scalar="' + sk + '" value="' + sv + '" onchange="markChanged(this)"> <span style="font-size:0.75rem;color:#888;">' + info.unit + '</span></td></tr>';
+    }
+  }
+  html += '</table></div></div>';
+
+  // Ramp table
+  var ramp = cfg.ramp_table;
+  if (ramp && ramp.length) {
+    html += '<div class="cfg-section">';
+    html += '<h3 onclick="toggleSection(this)">Production Ramp Table <span class="toggle">click to expand</span></h3>';
+    html += '<div class="cfg-body" style="display:none;">';
+    html += '<table class="cfg-table"><tr><th>Quantity</th><th>Ramp Factor</th></tr>';
+    for (var i = 0; i < ramp.length; i++) {
+      html += '<tr>';
+      html += '<td><input type="number" step="1" data-ramp="' + i + '" data-ri="0" value="' + ramp[i][0] + '" onchange="markChanged(this)"></td>';
+      html += '<td><input type="number" step="0.01" data-ramp="' + i + '" data-ri="1" value="' + ramp[i][1] + '" onchange="markChanged(this)"></td>';
+      html += '</tr>';
+    }
+    html += '</table></div></div>';
+  }
+
+  document.getElementById('cfgContent').innerHTML = html;
+}
+
+function toggleSection(el) {
+  var body = el.nextElementSibling;
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    el.querySelector('.toggle').textContent = 'click to collapse';
+  } else {
+    body.style.display = 'none';
+    el.querySelector('.toggle').textContent = 'click to expand';
+  }
+}
+
+function markChanged(el) { el.classList.add('changed'); }
+
+function collectConfig() {
+  // Start from current shopConfig and update with form values
+  var cfg = JSON.parse(JSON.stringify(shopConfig));
+
+  // Section fields
+  var sInputs = document.querySelectorAll('#cfgContent input[data-section]');
+  for (var i = 0; i < sInputs.length; i++) {
+    var inp = sInputs[i];
+    var sec = inp.getAttribute('data-section');
+    var key = inp.getAttribute('data-key');
+    cfg[sec][key] = parseFloat(inp.value);
+  }
+
+  // Scalar fields
+  var scInputs = document.querySelectorAll('#cfgContent input[data-scalar]');
+  for (var i = 0; i < scInputs.length; i++) {
+    var inp = scInputs[i];
+    var key = inp.getAttribute('data-scalar');
+    cfg[key] = parseFloat(inp.value);
+  }
+
+  // Ramp table
+  var rInputs = document.querySelectorAll('#cfgContent input[data-ramp]');
+  for (var i = 0; i < rInputs.length; i++) {
+    var inp = rInputs[i];
+    var ri = parseInt(inp.getAttribute('data-ramp'));
+    var ci = parseInt(inp.getAttribute('data-ri'));
+    if (!cfg.ramp_table) cfg.ramp_table = [];
+    if (!cfg.ramp_table[ri]) cfg.ramp_table[ri] = [0, 0];
+    cfg.ramp_table[ri][ci] = parseFloat(inp.value);
+  }
+
+  return cfg;
+}
+
+function showCfgStatus(msg, ok) {
+  var el = document.getElementById('cfgStatus');
+  el.style.display = 'block';
+  el.textContent = msg;
+  el.style.background = ok ? '#e8f5e8' : '#fde8e8';
+  el.style.color = ok ? '#1a5a1a' : '#8a1a1a';
+  setTimeout(function() { el.style.display = 'none'; }, 4000);
+}
+
+function saveConfig() {
+  var cfg = collectConfig();
+  var btn = document.getElementById('cfgSaveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  fetch('/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)})
+    .then(function(r) { return r.json(); })
+    .then(function(resp) {
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+      if (resp.ok) {
+        shopConfig = cfg;
+        showCfgStatus('Configuration saved. All future cost estimates will use these values.', true);
+        // Remove changed highlights
+        document.querySelectorAll('#cfgContent input.changed').forEach(function(el) { el.classList.remove('changed'); });
+      } else {
+        showCfgStatus('Save failed: ' + (resp.error || 'Unknown error'), false);
+      }
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+      showCfgStatus('Save failed: ' + err, false);
+    });
+}
+
+function resetConfig() {
+  if (!confirm('Reset all shop rates to factory defaults? This cannot be undone.')) return;
+  var btn = document.getElementById('cfgResetBtn');
+  btn.disabled = true;
+  btn.textContent = 'Resetting...';
+  fetch('/config/reset', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(cfg) {
+      btn.disabled = false;
+      btn.textContent = 'Reset Defaults';
+      if (cfg.error) {
+        showCfgStatus('Reset failed: ' + cfg.error, false);
+      } else {
+        shopConfig = cfg;
+        renderConfig(cfg);
+        showCfgStatus('Configuration reset to factory defaults.', true);
+      }
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Reset Defaults';
+      showCfgStatus('Reset failed: ' + err, false);
+    });
+}
+
 </script>
 </body>
 </html>"""
@@ -1742,7 +2066,8 @@ def analyze():
     cost_estimate = None
     try:
         cost_geo = _build_cost_geometry(geometry)
-        cost_estimate = cost_engine.estimate_cost(cost_geo, material_name, quantity)
+        shop_config = _get_config()
+        cost_estimate = cost_engine.estimate_cost(cost_geo, material_name, quantity, config=shop_config)
     except Exception as ce:
         print(f"Warning: Cost estimation failed (non-fatal): {ce}")
 
@@ -1785,6 +2110,40 @@ def analyze():
     if cost_estimate:
         resp["cost_estimate"] = cost_estimate
     return jsonify(resp)
+
+
+@app.route("/config", methods=["GET"])
+def get_config():
+    """Return the current shop configuration."""
+    try:
+        cfg = _get_config()
+        return jsonify(cfg)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/config", methods=["POST"])
+def save_config():
+    """Save updated shop configuration."""
+    try:
+        data = request.get_json(force=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "Expected JSON object"}), 400
+        _save_config(data)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/config/reset", methods=["POST"])
+def reset_config():
+    """Reset shop configuration to factory defaults."""
+    try:
+        default = cost_engine.get_default_config()
+        _save_config(default)
+        return jsonify(default)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/history")
