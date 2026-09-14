@@ -13,16 +13,23 @@ import shutil
 import subprocess
 import time
 import sqlite3
+import io
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_file, jsonify, url_for
 from werkzeug.utils import secure_filename
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
 import cost_engine
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
 app.config["UPLOAD_FOLDER"] = "/tmp/step_uploads"
 
-ALLOWED_EXTENSIONS = {"step", "stp", "STEP", "STP", "pdf", "PDF", "dwg", "DWG", "dxf", "DXF"}
+ALLOWED_EXTENSIONS = {"step", "stp", "STEP", "STP", "pdf", "PDF", "dwg", "DWG", "dxf", "DXF",
+                      "xlsx", "XLSX", "xls", "XLS", "csv", "CSV"}
 
 # ---------- SQLite persistent job history ----------
 DB_DIR = os.environ.get("DATA_DIR", "/data")
@@ -424,17 +431,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <h2 style="margin:0">Shop Rates &amp; Cost Parameters</h2>
         <div style="display:flex;gap:0.5rem;">
           <button class="btn" id="cfgSaveBtn" onclick="saveConfig()" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;">Save Changes</button>
+          <a href="/config/template" class="btn" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#1a6b3a;text-decoration:none;display:inline-flex;align-items:center;">Download Template</a>
+          <label class="btn" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#1a4a8a;cursor:pointer;">Import Excel
+            <input type="file" id="cfgFileInput" accept=".xlsx,.xls,.csv" style="display:none;" onchange="importRatesFile(this)">
+          </label>
           <button class="btn" id="cfgResetBtn" onclick="resetConfig()" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#8a1a1a;">Reset Defaults</button>
         </div>
       </div>
       <div id="cfgStatus" style="display:none;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem;font-size:0.85rem;"></div>
-      <p style="font-size:0.82rem;color:#666;margin-bottom:1.2rem;">Edit any value below. Changes are saved to the server and used for all future cost estimates. No code changes required.</p>
+      <p style="font-size:0.82rem;color:#666;margin-bottom:1.2rem;">Edit any value below, or upload an Excel file to bulk-import rates. Download the template to see the expected format. Changes are saved to the server and used for all future cost estimates.</p>
       <div id="cfgContent"><div class="empty-state">Loading configuration...</div></div>
     </div>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.2</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.3</div>
 
 <script>
 // --- Tab switching ---
@@ -464,19 +475,55 @@ materialSel.addEventListener("change", () => {
 dropZone.addEventListener("drop", ev => {
   const files = Array.from(ev.dataTransfer.files).filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['step','stp','pdf','dwg','dxf'].includes(ext);
+    return ['step','stp','pdf','dwg','dxf','xlsx','xls','csv'].includes(ext);
   });
   addFiles(files);
 });
 fileInput.addEventListener("change", () => { addFiles(Array.from(fileInput.files)); });
 
 function addFiles(files) {
+  var rateFiles = [];
   files.forEach(f => {
-    if (!selectedFiles.find(sf => sf.name === f.name && sf.size === f.size)) {
+    var ext = f.name.split('.').pop().toLowerCase();
+    if (['xlsx', 'xls', 'csv'].includes(ext)) {
+      rateFiles.push(f);
+    } else if (!selectedFiles.find(sf => sf.name === f.name && sf.size === f.size)) {
       selectedFiles.push(f);
     }
   });
   renderFileList();
+  // Auto-import Excel/CSV as shop rates
+  if (rateFiles.length > 0) {
+    rateFiles.forEach(function(rf) {
+      var fd = new FormData();
+      fd.append("file", rf);
+      var statusEl = document.getElementById("cfgStatus");
+      if (statusEl) {
+        statusEl.textContent = "Importing shop rates from " + rf.name + "...";
+        statusEl.className = "cfg-status info";
+        statusEl.style.display = "block";
+      }
+      fetch("/config/import", { method: "POST", body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.error) {
+            showCfgStatus("Import failed: " + data.error, false);
+          } else {
+            var msg = "Imported " + data.total_sections + " section(s) from " + rf.name;
+            if (data.changes && data.changes.length > 0) {
+              msg += ": " + data.changes.join(", ");
+            }
+            showCfgStatus(msg, true);
+            fetch("/config").then(function(r) { return r.json(); }).then(function(cfg) {
+              if (!cfg.error) { shopConfig = cfg; renderConfig(cfg); }
+            });
+            // Switch to Shop Rates tab to show results
+            if (typeof switchTab === 'function') switchTab('config');
+          }
+        })
+        .catch(function(err) { showCfgStatus("Import failed: " + err, false); });
+    });
+  }
 }
 
 function removeFile(idx) {
@@ -1462,6 +1509,40 @@ function resetConfig() {
     });
 }
 
+
+// --- Import Excel/CSV rates file ---
+function importRatesFile(input) {
+  if (!input.files || !input.files[0]) return;
+  var file = input.files[0];
+  var fd = new FormData();
+  fd.append("file", file);
+  var statusEl = document.getElementById("cfgStatus");
+  statusEl.textContent = "Importing " + file.name + "...";
+  statusEl.className = "cfg-status info";
+  statusEl.style.display = "block";
+  fetch("/config/import", { method: "POST", body: fd })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        showCfgStatus("Import failed: " + data.error, false);
+      } else {
+        var msg = "Imported " + data.total_sections + " section(s) from " + file.name;
+        if (data.changes && data.changes.length > 0) {
+          msg += ": " + data.changes.join(", ");
+        }
+        showCfgStatus(msg, true);
+        // Reload config to reflect changes
+        fetch("/config").then(function(r) { return r.json(); }).then(function(cfg) {
+          if (!cfg.error) { shopConfig = cfg; renderConfig(cfg); }
+        });
+      }
+      input.value = "";
+    })
+    .catch(function(err) {
+      showCfgStatus("Import failed: " + err, false);
+      input.value = "";
+    });
+}
 </script>
 </body>
 </html>"""
@@ -2147,6 +2228,316 @@ def reset_config():
         return jsonify(default)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ââ Sheet name -> config key mapping for Excel import âââââââââââââ
+_SHEET_TO_CONFIG = {
+    "machine rates":       "rates",
+    "rates":               "rates",
+    "setup times":         "setup",
+    "setup":               "setup",
+    "laser speeds":        "laser_speeds",
+    "laser capable":       "laser_capable",
+    "waterjet speeds":     "waterjet_speeds",
+    "material costs":      "material_cost_per_lb",
+    "material cost":       "material_cost_per_lb",
+    "density":             "density",
+    "machinability":       "machinability",
+    "bend time":           "bend_time_per_bend",
+    "weld rates":          "weld_rates",
+    "ramp table":          "ramp_table",
+    "batch handling":      "batch_handling",
+    "tap time":            "tap_time_per_hole",
+    "saw time":            "saw_time_per_cut",
+    "mrr turning":         "mrr_turning",
+    "mrr milling":         "mrr_milling",
+    "other settings":      "_scalar",
+}
+
+# Scalar keys (top-level non-dict values)
+_SCALAR_KEYS = {
+    "hardware_time_per_insert", "hardware_setup", "tap_setup",
+    "csink_time_per_hole", "csink_setup",
+    "passivation_time_per_sqft", "passivation_setup",
+    "passivation_min_charge", "passivation_parts_per_batch",
+    "second_op_weight_lb", "second_op_size_in",
+    "batch_threshold_hr",
+    "deburr_apex_hr_per_sqft", "deburr_hand_hr_per_part",
+    "deburr_apex_max_thickness", "deburr_apex_max_width",
+    "packaging_time_per_part", "packaging_setup", "packaging_rate",
+    "scrap_allowance_pct", "minimum_order_charge",
+    "rush_premium_pct", "material_markup_pct", "shop_markup_pct",
+}
+
+
+def _parse_excel_to_config(file_bytes, filename):
+    """Parse an uploaded Excel file into a partial config dict + change summary."""
+    if openpyxl is None:
+        raise RuntimeError("openpyxl not installed on server")
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    updates = {}
+    changes = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        config_key = _SHEET_TO_CONFIG.get(sheet_name.strip().lower())
+        if config_key is None:
+            changes.append({"sheet": sheet_name, "status": "skipped", "reason": "unknown sheet name"})
+            continue
+
+        rows = list(ws.iter_rows(min_row=1, values_only=True))
+        if len(rows) < 2:
+            changes.append({"sheet": sheet_name, "status": "skipped", "reason": "empty or header-only"})
+            continue
+
+        # First row is header
+        header = [str(c).strip().lower() if c else "" for c in rows[0]]
+        data_rows = rows[1:]
+
+        if config_key == "_scalar":
+            # Other Settings: col0=setting name, col1=value
+            count = 0
+            for row in data_rows:
+                if not row or not row[0]:
+                    continue
+                key = str(row[0]).strip()
+                if key in _SCALAR_KEYS and row[1] is not None:
+                    try:
+                        val = float(row[1])
+                        updates[key] = val
+                        count += 1
+                    except (ValueError, TypeError):
+                        pass
+            changes.append({"sheet": sheet_name, "status": "imported", "count": count})
+
+        elif config_key == "ramp_table":
+            # Ramp table: col0=qty, col1=factor
+            ramp = []
+            for row in data_rows:
+                if not row or row[0] is None or row[1] is None:
+                    continue
+                try:
+                    ramp.append([int(float(row[0])), float(row[1])])
+                except (ValueError, TypeError):
+                    pass
+            if ramp:
+                updates["ramp_table"] = sorted(ramp, key=lambda x: x[0])
+                changes.append({"sheet": sheet_name, "status": "imported", "count": len(ramp)})
+            else:
+                changes.append({"sheet": sheet_name, "status": "skipped", "reason": "no valid rows"})
+
+        elif config_key == "waterjet_speeds":
+            # col0=thickness, col1=standard IPM, col2=precision IPM
+            wj = {}
+            for row in data_rows:
+                if not row or row[0] is None:
+                    continue
+                try:
+                    thick = str(row[0]).strip()
+                    std = float(row[1]) if row[1] is not None else 0
+                    prec = float(row[2]) if len(row) > 2 and row[2] is not None else std / 2
+                    wj[thick] = [std, prec]
+                except (ValueError, TypeError, IndexError):
+                    pass
+            if wj:
+                updates["waterjet_speeds"] = wj
+                changes.append({"sheet": sheet_name, "status": "imported", "count": len(wj)})
+            else:
+                changes.append({"sheet": sheet_name, "status": "skipped", "reason": "no valid rows"})
+
+        else:
+            # Standard two-column dict: col0=key, col1=value
+            section = {}
+            for row in data_rows:
+                if not row or row[0] is None or row[1] is None:
+                    continue
+                try:
+                    key = str(row[0]).strip()
+                    val = float(row[1])
+                    section[key] = val
+                except (ValueError, TypeError):
+                    pass
+            if section:
+                updates[config_key] = section
+                changes.append({"sheet": sheet_name, "status": "imported", "count": len(section)})
+            else:
+                changes.append({"sheet": sheet_name, "status": "skipped", "reason": "no valid rows"})
+
+    wb.close()
+    return updates, changes
+
+
+def _parse_csv_to_config(file_bytes):
+    """Parse a CSV with columns: section, key, value."""
+    import csv
+    text = file_bytes.decode("utf-8-sig")
+    reader = csv.reader(io.StringIO(text))
+    header = next(reader, None)
+    if not header or len(header) < 3:
+        raise ValueError("CSV must have at least 3 columns: section, key, value")
+
+    updates = {}
+    count = 0
+    for row in reader:
+        if len(row) < 3 or not row[0].strip() or not row[1].strip():
+            continue
+        section = row[0].strip()
+        key = row[1].strip()
+        try:
+            val = float(row[2])
+        except (ValueError, TypeError):
+            continue
+        if section in _SCALAR_KEYS:
+            updates[section] = val
+            count += 1
+        else:
+            if section not in updates:
+                updates[section] = {}
+            if isinstance(updates[section], dict):
+                updates[section][key] = val
+                count += 1
+    return updates, [{"sheet": "CSV", "status": "imported", "count": count}]
+
+
+@app.route("/config/import", methods=["POST"])
+def import_config():
+    """Import shop rates from an uploaded Excel or CSV file."""
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        f = request.files["file"]
+        if not f.filename:
+            return jsonify({"error": "Empty filename"}), 400
+
+        ext = f.filename.rsplit(".", 1)[-1].lower()
+        file_bytes = f.read()
+
+        if ext in ("xlsx", "xls"):
+            updates, changes = _parse_excel_to_config(file_bytes, f.filename)
+        elif ext == "csv":
+            updates, changes = _parse_csv_to_config(file_bytes)
+        else:
+            return jsonify({"error": "Unsupported file type. Use .xlsx or .csv"}), 400
+
+        if not updates:
+            return jsonify({"error": "No valid rate data found in file", "details": changes}), 400
+
+        # Merge into existing config
+        cfg = _get_config()
+        for key, val in updates.items():
+            if isinstance(val, dict) and key in cfg and isinstance(cfg[key], dict):
+                cfg[key].update(val)
+            else:
+                cfg[key] = val
+        _save_config(cfg)
+
+        return jsonify({"ok": True, "changes": changes, "total_sections": len(updates)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/config/template")
+def config_template():
+    """Download an Excel template pre-filled with current shop rates."""
+    if openpyxl is None:
+        return jsonify({"error": "openpyxl not installed"}), 500
+
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = openpyxl.Workbook()
+    cfg = _get_config()
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="2c3e50", end_color="2c3e50", fill_type="solid")
+
+    def write_dict_sheet(ws, title, data, col0_name="Key", col1_name="Value"):
+        ws.title = title
+        ws.append([col0_name, col1_name])
+        for c in ws[1]:
+            c.font = header_font
+            c.fill = header_fill
+        for k, v in data.items():
+            ws.append([k, v])
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 16
+
+    # Machine Rates
+    write_dict_sheet(wb.active, "Machine Rates", cfg.get("rates", {}), "Machine", "Rate ($/hr)")
+
+    # Setup Times
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Setup Times", cfg.get("setup", {}), "Machine", "Setup (hr)")
+
+    # Laser Speeds
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Laser Speeds", cfg.get("laser_speeds", {}), "Material|Thickness", "Speed (IPM)")
+
+    # Material Costs
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Material Costs", cfg.get("material_cost_per_lb", {}), "Material", "Cost ($/lb)")
+
+    # Density
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Density", cfg.get("density", {}), "Material", "Density (lb/in3)")
+
+    # Machinability
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Machinability", cfg.get("machinability", {}), "Material", "Index")
+
+    # Weld Rates
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Weld Rates", cfg.get("weld_rates", {}), "Type", "hr/weld-inch")
+
+    # Bend Time
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Bend Time", cfg.get("bend_time_per_bend", {}), "Machine", "hr/bend")
+
+    # Tap Time
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Tap Time", cfg.get("tap_time_per_hole", {}), "Size Class", "hr/hole")
+
+    # Saw Time
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "Saw Time", cfg.get("saw_time_per_cut", {}), "Material", "hr/cut")
+
+    # MRR Turning
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "MRR Turning", cfg.get("mrr_turning", {}), "Material", "in3/min")
+
+    # MRR Milling
+    ws = wb.create_sheet()
+    write_dict_sheet(ws, "MRR Milling", cfg.get("mrr_milling", {}), "Material", "in3/min")
+
+    # Ramp Table
+    ws = wb.create_sheet("Ramp Table")
+    ws.append(["Quantity", "Ramp Factor"])
+    for c in ws[1]:
+        c.font = header_font
+        c.fill = header_fill
+    for entry in cfg.get("ramp_table", []):
+        ws.append(entry)
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 16
+
+    # Other Settings (scalars)
+    ws = wb.create_sheet("Other Settings")
+    ws.append(["Setting", "Value"])
+    for c in ws[1]:
+        c.font = header_font
+        c.fill = header_fill
+    for key in sorted(_SCALAR_KEYS):
+        if key in cfg:
+            ws.append([key, cfg[key]])
+    ws.column_dimensions["A"].width = 35
+    ws.column_dimensions["B"].width = 16
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     as_attachment=True, download_name="CMC_Shop_Rates_Template.xlsx")
+
 
 
 @app.route("/history")
