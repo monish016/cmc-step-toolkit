@@ -340,10 +340,74 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .cfg-table input { width: 100px; padding: 0.25rem 0.4rem; border: 1px solid #ccc; border-radius: 3px; font-size: 0.82rem; text-align: right; }
   .cfg-table input:focus { border-color: #1a3a1a; outline: none; box-shadow: 0 0 0 2px rgba(26,58,26,0.15); }
   .cfg-table input.changed { background: #fffbe6; border-color: #c0a000; }
-  @media (max-width: 600px) {
+  .cfg-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 0.8rem; flex-wrap: wrap; }
+  .cfg-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .btn-cfg { margin: 0; padding: 0.5rem 1.2rem; font-size: 0.85rem; }
+  .cost-summary-row { display: flex; gap: 0; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
+  .cost-summary-cell { flex: 1; padding: 0.8rem 1rem; text-align: center; min-width: 120px; }
+  .cost-section { overflow-x: auto; }
+  /* -- Responsive: Tablet (max 768px) -- */
+  @media (max-width: 768px) {
+    .header { padding: 1rem 1.2rem; }
+    .header h1 { font-size: 1.2rem; }
+    .container { padding: 0 1rem; margin: 1rem auto; }
+    .card { padding: 1.2rem; }
     .geo-grid { grid-template-columns: 1fr 1fr; }
-    .view-grid { grid-template-columns: 1fr; }
+    .view-grid { grid-template-columns: 1fr 1fr; }
+    .tab { padding: 0.5rem 0.8rem; font-size: 0.82rem; }
+    .cfg-table td:first-child { min-width: 140px; }
+    .history-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .detail-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  }
+  /* -- Responsive: Mobile (max 480px) -- */
+  @media (max-width: 480px) {
+    .header { padding: 0.8rem 1rem; flex-direction: column; align-items: flex-start; gap: 0.3rem; }
+    .header h1 { font-size: 1.1rem; }
+    .header .sub { font-size: 0.75rem; }
+    .container { padding: 0 0.6rem; margin: 0.6rem auto; }
+    .card { padding: 0.8rem; margin-bottom: 1rem; }
+    .card h2 { font-size: 1rem; }
+    .upload-zone { padding: 1.5rem 0.8rem; }
+    .upload-zone p { font-size: 0.9rem; }
     .params { grid-template-columns: 1fr; }
+    .btn { padding: 0.6rem 1.2rem; font-size: 0.9rem; width: 100%; text-align: center; }
+    .tab-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; }
+    .tab { padding: 0.5rem 0.7rem; font-size: 0.78rem; white-space: nowrap; flex-shrink: 0; }
+    .geo-grid { grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+    .geo-stat { padding: 0.5rem; }
+    .geo-stat .value { font-size: 1rem; }
+    .geo-stat .label { font-size: 0.65rem; }
+    .view-grid { grid-template-columns: 1fr; }
+    .result-header { flex-direction: column; gap: 0.4rem; align-items: flex-start; }
+    .result-header h3 { font-size: 0.9rem; }
+    .dl-row { flex-direction: column; }
+    .dl-btn { text-align: center; width: 100%; display: block; }
+    .batch-summary { flex-direction: column; gap: 0.5rem; }
+    .batch-summary .stat .num { font-size: 1.2rem; }
+    .history-table th, .history-table td { padding: 0.4rem 0.5rem; font-size: 0.75rem; white-space: nowrap; }
+    .detail-table th, .detail-table td { padding: 0.3rem 0.5rem; font-size: 0.78rem; }
+    .detail-table th { width: auto; min-width: 90px; }
+    .cfg-section h3 { font-size: 0.85rem; padding: 0.4rem 0.5rem; }
+    .cfg-table { font-size: 0.75rem; }
+    .cfg-table td:first-child { min-width: 120px; }
+    .cfg-table input { width: 80px; font-size: 0.75rem; }
+    .file-chip { font-size: 0.7rem; padding: 0.2rem 0.6rem; }
+    .nesting-box { padding: 0.6rem; }
+    .nesting-box h4 { font-size: 0.85rem; }
+    .cfg-header { flex-direction: column; align-items: stretch; }
+    .cfg-header h2 { font-size: 1rem; margin-bottom: 0.3rem; }
+    .cfg-actions { flex-direction: column; }
+    .cfg-actions .btn-cfg { width: 100%; text-align: center; display: block; }
+    .cost-summary-row { flex-direction: column; }
+    .cost-summary-cell { border-right: none !important; border-bottom: 1px solid #eee; padding: 0.6rem 0.8rem; }
+    .footer { padding: 1rem; font-size: 0.7rem; }
+  }
+  /* -- Responsive: Small phone (max 360px) -- */
+  @media (max-width: 360px) {
+    .geo-grid { grid-template-columns: 1fr; }
+    .geo-stat .value { font-size: 0.9rem; }
+    .header h1 { font-size: 1rem; }
+    .tab { font-size: 0.72rem; padding: 0.4rem 0.5rem; }
   }
 </style>
 </head>
@@ -427,15 +491,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <!-- Shop Rates Config Tab -->
   <div class="tab-content" id="tab-config">
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+      <div class="cfg-header">
         <h2 style="margin:0">Shop Rates &amp; Cost Parameters</h2>
-        <div style="display:flex;gap:0.5rem;">
-          <button class="btn" id="cfgSaveBtn" onclick="saveConfig()" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;">Save Changes</button>
-          <a href="/config/template" class="btn" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#1a6b3a;text-decoration:none;display:inline-flex;align-items:center;">Download Template</a>
-          <label class="btn" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#1a4a8a;cursor:pointer;">Import Excel
+        <div class="cfg-actions">
+          <button class="btn btn-cfg" id="cfgSaveBtn" onclick="saveConfig()">Save Changes</button>
+          <a href="/config/template" class="btn btn-cfg" style="background:#1a6b3a;text-decoration:none;display:inline-flex;align-items:center;">Download Template</a>
+          <label class="btn btn-cfg" style="background:#1a4a8a;cursor:pointer;">Import Excel
             <input type="file" id="cfgFileInput" accept=".xlsx,.xls,.csv" style="display:none;" onchange="importRatesFile(this)">
           </label>
-          <button class="btn" id="cfgResetBtn" onclick="resetConfig()" style="margin:0;padding:0.5rem 1.2rem;font-size:0.85rem;background:#8a1a1a;">Reset Defaults</button>
+          <button class="btn btn-cfg" id="cfgResetBtn" onclick="resetConfig()" style="background:#8a1a1a;">Reset Defaults</button>
         </div>
       </div>
       <div id="cfgStatus" style="display:none;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem;font-size:0.85rem;"></div>
@@ -445,7 +509,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.3</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.4</div>
 
 <script>
 // --- Tab switching ---
@@ -866,10 +930,10 @@ function renderCostEstimate(cost) {
   html += '<div style="background:#2a5a2a;color:#fff;padding:0.6rem 1rem;font-weight:700;font-size:1rem">Cost Estimate <span style="opacity:0.7;font-weight:400;font-size:0.85rem">(' + cost.material_display + ', Qty ' + cost.quantity + ')</span></div>';
 
   // Summary row
-  html += '<div style="display:flex;gap:0;border-bottom:1px solid #ddd">';
-  html += '<div style="flex:1;padding:0.8rem 1rem;text-align:center;border-right:1px solid #ddd"><div style="font-size:1.6rem;font-weight:700;color:#2a5a2a">$' + cost.unit_cost.toFixed(2) + '</div><div style="font-size:0.75rem;color:#666">Per Part</div></div>';
-  html += '<div style="flex:1;padding:0.8rem 1rem;text-align:center;border-right:1px solid #ddd"><div style="font-size:1.6rem;font-weight:700;color:#1a3a1a">$' + cost.total_cost.toFixed(2) + '</div><div style="font-size:0.75rem;color:#666">Total (' + cost.quantity + ' pcs)</div></div>';
-  html += '<div style="flex:1;padding:0.8rem 1rem;text-align:center"><div style="font-size:1.1rem;font-weight:600;color:#555">' + cost.total_time_hr.toFixed(2) + ' hr</div><div style="font-size:0.75rem;color:#666">Total Shop Time</div></div>';
+  html += '<div class="cost-summary-row">';
+  html += '<div class="cost-summary-cell" style="border-right:1px solid #ddd"><div style="font-size:1.6rem;font-weight:700;color:#2a5a2a">$' + cost.unit_cost.toFixed(2) + '</div><div style="font-size:0.75rem;color:#666">Per Part</div></div>';
+  html += '<div class="cost-summary-cell" style="border-right:1px solid #ddd"><div style="font-size:1.6rem;font-weight:700;color:#1a3a1a">$' + cost.total_cost.toFixed(2) + '</div><div style="font-size:0.75rem;color:#666">Total (' + cost.quantity + ' pcs)</div></div>';
+  html += '<div class="cost-summary-cell"><div style="font-size:1.1rem;font-weight:600;color:#555">' + cost.total_time_hr.toFixed(2) + ' hr</div><div style="font-size:0.75rem;color:#666">Total Shop Time</div></div>';
   html += '</div>';
 
   // Operations breakdown
