@@ -662,6 +662,7 @@ if __name__ == "__main__":
     ap.add_argument("step_file")
     ap.add_argument("--density", type=float, default=7.9, help="g/cm3, default 7.9 (stainless)")
     ap.add_argument("--k", type=float, default=0.44, help="bend-allowance K-factor")
+    ap.add_argument("--material", default="steel", help="material type (accepted but unused in this version)")
     ap.add_argument("--out", default="geometry_extract.json")
     args = ap.parse_args()
     res = run(args.step_file, args.density, args.k, args.out)
