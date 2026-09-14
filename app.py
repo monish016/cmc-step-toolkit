@@ -199,6 +199,9 @@ def _build_cost_geometry(geometry):
         if ftype == "round":
             dia = f.get("diameter_in", 0) or 0
             feature_perim += math.pi * dia
+        elif ftype == "countersink":
+            dia = f.get("diameter_in", 0) or 0
+            feature_perim += math.pi * dia
         elif ftype == "square_or_rect":
             sz = f.get("size_in", [0, 0])
             feature_perim += 2 * (sz[0] + sz[1])
