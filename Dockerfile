@@ -29,7 +29,8 @@ RUN pip install --no-cache-dir \
     reportlab \
     matplotlib \
     Pillow \
-    PyMuPDF
+    PyMuPDF \
+    openpyxl
 
 WORKDIR /app
 
