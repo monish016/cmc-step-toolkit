@@ -437,6 +437,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="tab active" onclick="switchTab('upload')">Upload &amp; Analyze</div>
     <div class="tab" onclick="switchTab('history')">Recent Jobs <span id="historyCount"></span></div>
     <div class="tab" onclick="switchTab('config')">Shop Rates</div>
+    <div class="tab" onclick="switchTab('changelog')">Revision History</div>
   </div>
 
   <!-- Upload Tab -->
@@ -521,7 +522,118 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div>
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.4</div>
+  <!-- Revision History Tab -->
+  <div class="tab-content" id="tab-changelog">
+    <div class="card">
+      <h2>Revision History</h2>
+      <div style="max-width:800px">
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.5 - September 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Cost Engine v3.0 + Revision History</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Shop-calibrated laser/waterjet speed tables with auto machine routing (HSG G4020X, OMAX 60120)</li>
+            <li>Assist gas auto-selection: O2 for carbon steel, N2 for stainless, compressed air (22TK) when eligible</li>
+            <li>Burden-based all-in rates with full breakdown (labor + gas + electricity + consumables + depreciation)</li>
+            <li>Smart press brake routing: Adira 160T vs Guifil 110T by tonnage and bed length</li>
+            <li>Second operator rule for parts over 48 inches or 50 lbs</li>
+            <li>3-tier deburring: Apex Time Saver (304 SS) > Grizzly Flap Wheel (>=0.5 sqft) > Hand</li>
+            <li>Welding bench/off-bench routing with fixture tracking</li>
+            <li>Setup itemization per operation (programming, material pull, staging, accounting, QA)</li>
+            <li>Production ramp table for quantity scaling</li>
+            <li>Frontend: per-operation annotations (assist gas, tonnage, speed, weld location), expandable burden/setup rows</li>
+            <li>Added this revision history page</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.4 - August 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Feature Detection + Responsive Design</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Countersink, counterbore, and chamfer detection via cone face analysis</li>
+            <li>Tap drill and clearance hole lookup tables with hardware hints</li>
+            <li>Feature detail table with position, confidence, and hardware callouts</li>
+            <li>Responsive mobile and tablet layout</li>
+            <li>Excel upload for bulk shop rates import</li>
+            <li>Fixed false hole counts (aspect ratio filter for slot/notch detection)</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.3 - July 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Shop Rates Admin + Cost Engine v2.0</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Built Shop Rates admin panel with live rate editing</li>
+            <li>Refactored cost engine to load config from SQLite</li>
+            <li>Cost API endpoints for rate management</li>
+            <li>Dev branch with separate Railway deployment for testing</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.2 - July 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Cost Engine v1.0 + Complexity Scoring</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Initial cost engine with laser, brake, deburr, hardware, passivation operations</li>
+            <li>Quantity break pricing with ramp efficiency</li>
+            <li>Process time and cost complexity indicators</li>
+            <li>Nesting estimate in results</li>
+            <li>CSV and PDF export buttons</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.1 - June 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">PDF Drawing Extraction</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>PDF and DWG file upload support for drawing extraction</li>
+            <li>Per-page drawing analysis with hole/feature callout parsing</li>
+            <li>Flat pattern diagram and STEP-style report for PDF results</li>
+            <li>Improved projected drawing views (darker/more visible)</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.0 - June 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Advanced Geometry Analysis</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Gauge auto-detection from material thickness</li>
+            <li>K-factor lookup from CMC bend tables</li>
+            <li>Round, square, slot, and obround hole classification</li>
+            <li>Multi-cut cross-section flat pattern computation</li>
+            <li>Bend deduction and flat length calculation</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v2.0 - May 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Dual-Path Analysis + Web UI</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Sheet metal vs machined part classifier</li>
+            <li>Machined parts analyzer</li>
+            <li>Batch multi-file upload with drag and drop</li>
+            <li>SQLite persistent job history</li>
+            <li>Multiple material support (stainless, carbon, aluminum, copper, brass)</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #888;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#555">v1.0 - April 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Initial Release</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>STEP file upload and B-Rep face classification</li>
+            <li>Flat pattern extraction with bend detection</li>
+            <li>3D preview rendering</li>
+            <li>PDF quoting report generation</li>
+            <li>Deployed on Railway with Docker</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.5</div>
 
 <script>
 // --- Tab switching ---
