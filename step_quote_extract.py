@@ -1478,6 +1478,44 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         t_mm = transverse_pos_mm(yz)
         feat["transverse_in"] = round(t_mm/25.4, 3) if t_mm is not None else None
 
+    # --- Deduplicate features ---
+    # On bent parts, the same physical hole can produce multiple face clusters
+    # that get classified identically.  Merge features with the same type,
+    # matching size (within 0.05 in), and matching length_in (within 0.1 in).
+    def _feat_key(f):
+        """Return a coarse key for grouping potential duplicates."""
+        t = f["type"]
+        if t == "round":
+            return (t, round(f.get("diameter_in", 0) * 20) / 20)  # 0.05" buckets
+        elif t in ("square_or_rect", "slot"):
+            s = f.get("size_in", (0, 0))
+            return (t, round(s[0]*20)/20, round(s[1]*20)/20)
+        return (t,)
+
+    deduped = []
+    seen_keys = []  # list of (key, length_in, transverse_in) tuples
+    for f in features:
+        k = _feat_key(f)
+        dup = False
+        for sk, sl, st in seen_keys:
+            if sk != k:
+                continue
+            # Same type & size — check spatial proximity
+            len_match = abs((f.get("length_in") or 0) - (sl or 0)) < 0.1
+            # If both have transverse positions, they must also be close
+            if f.get("transverse_in") is not None and st is not None:
+                trans_match = abs(f["transverse_in"] - st) < 0.1
+            else:
+                # At least one is None (bent face), match on length alone
+                trans_match = True
+            if len_match and trans_match:
+                dup = True
+                break
+        if not dup:
+            deduped.append(f)
+            seen_keys.append((k, f.get("length_in"), f.get("transverse_in")))
+    features = deduped
+
     # --- Gauge auto-detection ---
     gauge_num, gauge_nominal = lookup_gauge(thickness_mm / 25.4, material)
 
