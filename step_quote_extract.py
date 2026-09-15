@@ -1493,11 +1493,11 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         return (t,)
 
     deduped = []
-    seen_keys = []  # list of (key, length_in, transverse_in) tuples
+    seen_keys = []  # list of (key, length_in, transverse_in, center) tuples
     for f in features:
         k = _feat_key(f)
         dup = False
-        for sk, sl, st in seen_keys:
+        for sk, sl, st, sc in seen_keys:
             if sk != k:
                 continue
             # Same type & size — check spatial proximity
@@ -1506,14 +1506,17 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             if f.get("transverse_in") is not None and st is not None:
                 trans_match = abs(f["transverse_in"] - st) < 0.1
             else:
-                # At least one is None (bent face), match on length alone
-                trans_match = True
+                # At least one T is None (bent face) — use 3D centroid distance
+                # to distinguish true duplicates (< 10mm apart) from mirrored
+                # features on opposite sides of the part (>> 10mm apart).
+                center_dist = math.dist(f["center"], sc) if f.get("center") and sc else 999
+                trans_match = center_dist < 10.0
             if len_match and trans_match:
                 dup = True
                 break
         if not dup:
             deduped.append(f)
-            seen_keys.append((k, f.get("length_in"), f.get("transverse_in")))
+            seen_keys.append((k, f.get("length_in"), f.get("transverse_in"), f.get("center")))
     features = deduped
 
     # --- Gauge auto-detection ---
