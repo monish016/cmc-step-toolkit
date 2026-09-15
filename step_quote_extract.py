@@ -1562,6 +1562,21 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
                     break
             if not placed:
                 sub_clusters.append([f])
+        # Bend-fragmentation check: if >2 T=None members share the same
+        # first 2D component (cross-section width position), they are almost
+        # certainly face fragments of ONE hole split across bend segments.
+        # Force-merge them.  (2 members could be opposite-side holes, so
+        # we leave those to the 2D distance check above.)
+        if len(sub_clusters) > 2 and len(sub_clusters) == len(members):
+            all_t_none = all(m.get("transverse_in") is None for m in members)
+            all_have_2d = all(m.get("_2d") is not None for m in members)
+            if all_t_none and all_have_2d:
+                u_vals = [m["_2d"][0] for m in members]
+                u_spread = max(u_vals) - min(u_vals)
+                if u_spread < 2.0:  # within 2mm in cross-section width
+                    sub_clusters = [members]
+                    _grp_log.append(f"  FRAG-MERGE: {len(members)} T=None members, u_spread={u_spread:.2f}mm < 2mm -> 1")
+
         _dedup_log.append(f"Group key={_gk} L={_gL}: {len(members)} -> {len(sub_clusters)} sub-clusters")
         _dedup_log.extend(_grp_log)
         # Keep one representative from each sub-cluster
