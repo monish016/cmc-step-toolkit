@@ -529,7 +529,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div style="max-width:800px">
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.5 - September 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.5 - September 15, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Cost Engine v3.0 + Revision History</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Shop-calibrated laser/waterjet speed tables with auto machine routing (HSG G4020X, OMAX 60120)</li>
@@ -547,7 +547,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.4 - August 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.4 - September 14, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Feature Detection + Responsive Design</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Countersink, counterbore, and chamfer detection via cone face analysis</li>
@@ -560,7 +560,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.3 - July 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.3 - September 12, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Shop Rates Admin + Cost Engine v2.0</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Built Shop Rates admin panel with live rate editing</li>
@@ -571,7 +571,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.2 - July 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.2 - September 9, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Cost Engine v1.0 + Complexity Scoring</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Initial cost engine with laser, brake, deburr, hardware, passivation operations</li>
@@ -583,7 +583,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.1 - June 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.1 - September 8, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">PDF Drawing Extraction</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>PDF and DWG file upload support for drawing extraction</li>
@@ -594,7 +594,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.0 - June 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.0 - September 4, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Advanced Geometry Analysis</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Gauge auto-detection from material thickness</li>
@@ -606,7 +606,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v2.0 - May 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v2.0 - September 3, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Dual-Path Analysis + Web UI</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Sheet metal vs machined part classifier</li>
@@ -618,7 +618,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #888;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#555">v1.0 - April 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#555">v1.0 - September 2, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Initial Release</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>STEP file upload and B-Rep face classification</li>
