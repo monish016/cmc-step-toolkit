@@ -1492,6 +1492,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             return (t, round(s[0]*20)/20, round(s[1]*20)/20)
         return (t,)
 
+    _dedup_log = []
     # Two-pass dedup: group by (key, rounded_L), then sub-cluster
     # by transverse position or 2D cross-section proximity.
     # On bent parts, face clusters from the same hole can be scattered
@@ -1520,8 +1521,8 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
                        bb["zmax"]-bb["zmin"]])
     _dedup_2d_threshold = max(_bb_dims[1] / 2.5, 15.0)  # at least 15mm
 
-    import sys
-    print(f"[DEDUP] bb_dims={[round(d,1) for d in _bb_dims]}, 2d_threshold={_dedup_2d_threshold:.1f}mm", file=sys.stderr)
+    _dedup_log = []
+    _dedup_log.append(f"bb_dims={[round(d,1) for d in _bb_dims]}, 2d_threshold={_dedup_2d_threshold:.1f}mm")
 
     deduped = []
     for (_gk, _gL), members in _groups.items():
@@ -1530,24 +1531,25 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             continue
         # Sub-cluster members by spatial proximity
         sub_clusters = []
+        _grp_log = []
         for f in members:
             placed = False
-            for cluster in sub_clusters:
+            for ci, cluster in enumerate(sub_clusters):
                 # Check if f matches ANY member of this cluster
                 for rep in cluster:
                     if f.get("transverse_in") is not None and rep.get("transverse_in") is not None:
                         if abs(f["transverse_in"] - rep["transverse_in"]) < 0.1:
                             cluster.append(f)
                             placed = True
+                            _grp_log.append(f"  merged via T: T_f={f['transverse_in']:.3f} T_r={rep['transverse_in']:.3f}")
                             break
                     else:
                         # Use 2D cross-section distance instead of 3D
-                        # This eliminates the bend-axis component that scatters
-                        # face clusters from the same hole on bent parts
                         if f.get("_2d") and rep.get("_2d"):
                             d = math.dist(f["_2d"], rep["_2d"])
                         else:
                             d = 999
+                        _grp_log.append(f"  2d_dist={d:.1f}mm f_2d={f.get('_2d')} r_2d={rep.get('_2d')} thresh={_dedup_2d_threshold:.1f} {'MERGE' if d < _dedup_2d_threshold else 'SKIP'}")
                         if d < _dedup_2d_threshold:
                             cluster.append(f)
                             placed = True
@@ -1556,11 +1558,12 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
                     break
             if not placed:
                 sub_clusters.append([f])
-        print(f"[DEDUP] Group key={_gk} L={_gL}: {len(members)} -> {len(sub_clusters)} sub-clusters", file=sys.stderr)
+        _dedup_log.append(f"Group key={_gk} L={_gL}: {len(members)} -> {len(sub_clusters)} sub-clusters")
+        _dedup_log.extend(_grp_log)
         # Keep one representative from each sub-cluster
         for cluster in sub_clusters:
             deduped.append(cluster[0])
-    print(f"[DEDUP] Result: {len(features)} -> {len(deduped)} features", file=sys.stderr)
+    _dedup_log.append(f"Result: {len(features)} -> {len(deduped)} features")
     # Clean up temp keys
     for f in deduped:
         f.pop("_2d", None)
@@ -1635,6 +1638,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         "features_raw_count": len(features),
         "features_unclassified_count": unclassified_count,
         "features": features,
+        "_dedup_log": _dedup_log,
         "processes": ["blanking", "bending"] + (
             ["tapping (check manually)"] if any(f["type"] == "round" and f.get("diameter_in", 1) < 0.5 for f in features) else []
         ),
