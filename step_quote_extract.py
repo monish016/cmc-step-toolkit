@@ -1492,31 +1492,51 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             return (t, round(s[0]*20)/20, round(s[1]*20)/20)
         return (t,)
 
-    deduped = []
-    seen_keys = []  # list of (key, length_in, transverse_in, center) tuples
+    # Two-pass dedup: group by (key, rounded_L), then sub-cluster
+    # by transverse position or 3D centroid proximity.
+    from collections import defaultdict
+    _groups = defaultdict(list)
     for f in features:
         k = _feat_key(f)
-        dup = False
-        for sk, sl, st, sc in seen_keys:
-            if sk != k:
-                continue
-            # Same type & size — check spatial proximity
-            len_match = abs((f.get("length_in") or 0) - (sl or 0)) < 0.1
-            # If both have transverse positions, they must also be close
-            if f.get("transverse_in") is not None and st is not None:
-                trans_match = abs(f["transverse_in"] - st) < 0.1
-            else:
-                # At least one T is None (bent face) — use 3D centroid distance
-                # to distinguish true duplicates (< 10mm apart) from mirrored
-                # features on opposite sides of the part (>> 10mm apart).
-                center_dist = math.dist(f["center"], sc) if f.get("center") and sc else 999
-                trans_match = center_dist < 10.0
-            if len_match and trans_match:
-                dup = True
-                break
-        if not dup:
-            deduped.append(f)
-            seen_keys.append((k, f.get("length_in"), f.get("transverse_in"), f.get("center")))
+        L_bucket = round((f.get("length_in") or 0) * 10) / 10  # 0.1" buckets
+        _groups[(k, L_bucket)].append(f)
+
+    # Dynamic distance threshold for T=None features:
+    # half the second-smallest bounding-box dimension (the part "width")
+    _bb_dims = sorted([bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"],
+                       bb["zmax"]-bb["zmin"]])
+    _dedup_3d_threshold = max(_bb_dims[1] / 3.0, 15.0)  # at least 15mm
+
+    deduped = []
+    for (_gk, _gL), members in _groups.items():
+        if len(members) == 1:
+            deduped.append(members[0])
+            continue
+        # Sub-cluster members by spatial proximity
+        sub_clusters = []
+        for f in members:
+            placed = False
+            for cluster in sub_clusters:
+                # Check if f matches ANY member of this cluster
+                for rep in cluster:
+                    if f.get("transverse_in") is not None and rep.get("transverse_in") is not None:
+                        if abs(f["transverse_in"] - rep["transverse_in"]) < 0.1:
+                            cluster.append(f)
+                            placed = True
+                            break
+                    else:
+                        d = math.dist(f["center"], rep["center"]) if f.get("center") and rep.get("center") else 999
+                        if d < _dedup_3d_threshold:
+                            cluster.append(f)
+                            placed = True
+                            break
+                if placed:
+                    break
+            if not placed:
+                sub_clusters.append([f])
+        # Keep one representative from each sub-cluster
+        for cluster in sub_clusters:
+            deduped.append(cluster[0])
     features = deduped
 
     # --- Gauge auto-detection ---
