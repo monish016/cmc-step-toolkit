@@ -1481,15 +1481,19 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # --- Deduplicate features ---
     # On bent parts, the same physical hole can produce multiple face clusters
     # that get classified identically.  Merge features with the same type,
-    # matching size (within 0.05 in), and matching length_in (within 0.1 in).
+    # matching size (within tolerance), and matching length_in (within 0.1 in).
+    # NOTE: Use coarse 0.1" buckets (round*10/10) instead of 0.05" because
+    # face clusters from the SAME physical hole can measure slightly different
+    # sizes (different faces in each cluster → different size calculation).
+    # Tight buckets cause same-hole duplicates to land in different groups.
     def _feat_key(f):
         """Return a coarse key for grouping potential duplicates."""
         t = f["type"]
         if t == "round":
-            return (t, round(f.get("diameter_in", 0) * 20) / 20)  # 0.05" buckets
+            return (t, round(f.get("diameter_in", 0) * 10) / 10)  # 0.1" buckets
         elif t in ("square_or_rect", "slot"):
             s = f.get("size_in", (0, 0))
-            return (t, round(s[0]*20)/20, round(s[1]*20)/20)
+            return (t, round(s[0]*10)/10, round(s[1]*10)/10)
         return (t,)
 
     _dedup_log = []
@@ -1503,7 +1507,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     _groups = defaultdict(list)
     for f in features:
         k = _feat_key(f)
-        L_bucket = round((f.get("length_in") or 0) * 10) / 10  # 0.1" buckets
+        L_bucket = round((f.get("length_in") or 0) * 5) / 5  # 0.2" buckets
         _groups[(k, L_bucket)].append(f)
 
     # Pre-compute 2D cross-section projections for each feature center
