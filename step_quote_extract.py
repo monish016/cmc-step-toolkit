@@ -1493,7 +1493,11 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         return (t,)
 
     # Two-pass dedup: group by (key, rounded_L), then sub-cluster
-    # by transverse position or 3D centroid proximity.
+    # by transverse position or 2D cross-section proximity.
+    # On bent parts, face clusters from the same hole can be scattered
+    # in 3D space across bend segments.  Using 2D cross-section distance
+    # (perpendicular to the bend axis) eliminates the bending effect and
+    # gives a reliable proximity measure.
     from collections import defaultdict
     _groups = defaultdict(list)
     for f in features:
@@ -1501,11 +1505,23 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         L_bucket = round((f.get("length_in") or 0) * 10) / 10  # 0.1" buckets
         _groups[(k, L_bucket)].append(f)
 
+    # Pre-compute 2D cross-section projections for each feature center
+    for f in features:
+        if f.get("center"):
+            f["_2d"] = to_2d(f["center"])
+        else:
+            f["_2d"] = None
+
     # Dynamic distance threshold for T=None features:
-    # half the second-smallest bounding-box dimension (the part "width")
+    # Use cross-section part width / 2.5 — features from the same hole
+    # project to within a few mm in 2D, while features on opposite flanges
+    # are separated by the full part width (~95mm for this geometry).
     _bb_dims = sorted([bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"],
                        bb["zmax"]-bb["zmin"]])
-    _dedup_3d_threshold = max(_bb_dims[1] / 3.0, 15.0)  # at least 15mm
+    _dedup_2d_threshold = max(_bb_dims[1] / 2.5, 15.0)  # at least 15mm
+
+    import sys
+    print(f"[DEDUP] bb_dims={[round(d,1) for d in _bb_dims]}, 2d_threshold={_dedup_2d_threshold:.1f}mm", file=sys.stderr)
 
     deduped = []
     for (_gk, _gL), members in _groups.items():
@@ -1525,8 +1541,14 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
                             placed = True
                             break
                     else:
-                        d = math.dist(f["center"], rep["center"]) if f.get("center") and rep.get("center") else 999
-                        if d < _dedup_3d_threshold:
+                        # Use 2D cross-section distance instead of 3D
+                        # This eliminates the bend-axis component that scatters
+                        # face clusters from the same hole on bent parts
+                        if f.get("_2d") and rep.get("_2d"):
+                            d = math.dist(f["_2d"], rep["_2d"])
+                        else:
+                            d = 999
+                        if d < _dedup_2d_threshold:
                             cluster.append(f)
                             placed = True
                             break
@@ -1534,9 +1556,14 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
                     break
             if not placed:
                 sub_clusters.append([f])
+        print(f"[DEDUP] Group key={_gk} L={_gL}: {len(members)} -> {len(sub_clusters)} sub-clusters", file=sys.stderr)
         # Keep one representative from each sub-cluster
         for cluster in sub_clusters:
             deduped.append(cluster[0])
+    print(f"[DEDUP] Result: {len(features)} -> {len(deduped)} features", file=sys.stderr)
+    # Clean up temp keys
+    for f in deduped:
+        f.pop("_2d", None)
     features = deduped
 
     # --- Gauge auto-detection ---
