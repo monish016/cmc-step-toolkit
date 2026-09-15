@@ -4,11 +4,12 @@ CMC STEP Quoting Toolkit - Web Application
 Upload STEP files, get geometry extraction + quoting PDF back.
 Built for Chicago Metalcraft sheet-metal parts.
 
-v3.0 - Gauge detection, hardware callouts, complexity scoring, countersink/chamfer detection, feature detail table, improved UX
+v3.4 - Gauge detection, hardware callouts, complexity scoring, countersink/chamfer detection, feature detail table, improved UX, Excel shop rates import, responsive mobile/tablet layout
 """
 import os
 import uuid
 import json
+import math
 import shutil
 import subprocess
 import time
@@ -21,7 +22,6 @@ try:
     import openpyxl
 except ImportError:
     openpyxl = None
-
 import cost_engine
 
 app = Flask(__name__)
@@ -94,7 +94,7 @@ def _get_jobs(limit=200):
     return [dict(r) for r in rows]
 
 
-# Initialise DB at import time (runs once per gunicorn worker)
+# ---------- SQLite shop config persistence ----------
 
 def _init_config_db():
     """Create the shop_config table if it doesn't exist."""
@@ -144,8 +144,7 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1] in ALLOWED_EXTENSIONS
 
 
-
-# -- Density-to-material name mapping for cost engine ----------------
+# ── Density-to-material name mapping for cost engine ────────────────
 DENSITY_TO_MATERIAL = {
     "7.9":      "Stainless Steel (SUS304)",
     "7.85":     "Mild/Carbon Steel",
@@ -183,6 +182,7 @@ def _build_cost_geometry(geometry):
     for f in features:
         ftype = f.get("type", "")
         hint = (f.get("hardware_hint", "") or "").lower()
+
         if ftype == "countersink":
             csink_count += 1
             hole_count += 1
@@ -191,11 +191,15 @@ def _build_cost_geometry(geometry):
             if "tap" in hint:
                 tap_count += 1
                 dia = f.get("diameter_in", 0) or 0
-                if dia < 0.15: tap_sizes.append("small")
-                elif dia < 0.35: tap_sizes.append("medium")
-                else: tap_sizes.append("large")
+                if dia < 0.15:
+                    tap_sizes.append("small")
+                elif dia < 0.35:
+                    tap_sizes.append("medium")
+                else:
+                    tap_sizes.append("large")
             elif "clearance" in hint:
                 hardware_count += 1
+
     tap_size_class = max(set(tap_sizes), key=tap_sizes.count) if tap_sizes else "medium"
 
     # Estimate cut perimeter from flat pattern + features
@@ -206,12 +210,12 @@ def _build_cost_geometry(geometry):
         if ftype == "round":
             dia = f.get("diameter_in", 0) or 0
             feature_perim += math.pi * dia
-        elif ftype == "countersink":
-            dia = f.get("diameter_in", 0) or 0
-            feature_perim += math.pi * dia
         elif ftype == "square_or_rect":
             sz = f.get("size_in", [0, 0])
             feature_perim += 2 * (sz[0] + sz[1])
+        elif ftype == "countersink":
+            dia = f.get("diameter_in", 0) or 0
+            feature_perim += math.pi * dia
         elif ftype == "slot":
             sw = f.get("width_in", 0) or 0
             sl = f.get("slot_length_in", 0) or 0
@@ -223,6 +227,9 @@ def _build_cost_geometry(geometry):
 
     # Fab type label
     fab_label = "Sheet Metal" if fab_type == "sheet_metal" else "Machined"
+
+    # Gauge number from thickness for hole quality checks
+    gauge_num = geometry.get("gauge", None)
 
     return {
         "fab_type": fab_label,
@@ -241,7 +248,10 @@ def _build_cost_geometry(geometry):
         "volume_in3": vol_in3,
         "machining_type": geometry.get("machining_type", None),
         "material_removal_ratio": geometry.get("material_removal_ratio", 0),
+        "gauge_num": gauge_num,
+        "features_list": features,
     }
+
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -346,7 +356,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .cost-summary-row { display: flex; gap: 0; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
   .cost-summary-cell { flex: 1; padding: 0.8rem 1rem; text-align: center; min-width: 120px; }
   .cost-section { overflow-x: auto; }
-  /* -- Responsive: Tablet (max 768px) -- */
+  /* ── Responsive: Tablet (max 768px) ── */
   @media (max-width: 768px) {
     .header { padding: 1rem 1.2rem; }
     .header h1 { font-size: 1.2rem; }
@@ -359,7 +369,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .history-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .detail-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   }
-  /* -- Responsive: Mobile (max 480px) -- */
+
+  /* ── Responsive: Mobile (max 480px) ── */
   @media (max-width: 480px) {
     .header { padding: 0.8rem 1rem; flex-direction: column; align-items: flex-start; gap: 0.3rem; }
     .header h1 { font-size: 1.1rem; }
@@ -402,7 +413,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .cost-summary-cell { border-right: none !important; border-bottom: 1px solid #eee; padding: 0.6rem 0.8rem; }
     .footer { padding: 1rem; font-size: 0.7rem; }
   }
-  /* -- Responsive: Small phone (max 360px) -- */
+
+  /* ── Responsive: Small phone (max 360px) ── */
   @media (max-width: 360px) {
     .geo-grid { grid-template-columns: 1fr; }
     .geo-stat .value { font-size: 0.9rem; }
@@ -456,11 +468,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <label for="customDensity">Custom density (g/cm3)</label>
             <input type="number" id="customDensity" name="custom_density" value="7.9" step="0.01" min="0.5" max="25">
           </div>
-        </div>
           <div class="param-group">
             <label for="quantity">Quantity</label>
             <input type="number" id="quantity" name="quantity" value="1" min="1" max="100000" step="1">
           </div>
+        </div>
         <button type="submit" class="btn" id="submitBtn" disabled>Analyze files</button>
       </form>
       <div class="progress" id="progress">
@@ -539,7 +551,7 @@ materialSel.addEventListener("change", () => {
 dropZone.addEventListener("drop", ev => {
   const files = Array.from(ev.dataTransfer.files).filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['step','stp','pdf','dwg','dxf','xlsx','xls','csv'].includes(ext);
+    return ['step','stp','pdf','dwg','dxf'].includes(ext);
   });
   addFiles(files);
 });
@@ -770,7 +782,6 @@ function renderResults(results) {
       html += '<table class="detail-table"><tr><th>Identified processes</th><td>' + g.processes.join(', ') + '</td></tr></table>';
     }
 
-    
     // Cost Estimate
     if (r.cost_estimate) {
       html += renderCostEstimate(r.cost_estimate);
@@ -941,14 +952,48 @@ function renderCostEstimate(cost) {
     html += '<table class="detail-table" style="margin:0;border-radius:0;font-size:0.82rem">';
     html += '<thead><tr style="background:#f0f5f0"><th>Operation</th><th>Setup</th><th>Cycle</th><th>Run Time</th><th>Rate</th><th>Cost</th></tr></thead><tbody>';
     cost.operations.forEach(function(op) {
+      var opNote = '';
+      if (op.assist_gas) opNote += ' <span style="color:#0066aa;font-size:0.72rem">(' + op.assist_gas + ')</span>';
+      if (op.tonnage_est) opNote += ' <span style="color:#666;font-size:0.72rem">' + op.tonnage_est + 'T</span>';
+      if (op.speed_ipm) opNote += ' <span style="color:#888;font-size:0.72rem">' + op.speed_ipm + ' ipm</span>';
+      if (op.weld_location) opNote += ' <span style="color:#795548;font-size:0.72rem">[' + op.weld_location + ']</span>';
+      if (op.second_operator) opNote += ' <span style="color:#c62828;font-size:0.72rem">+2nd op $' + op.second_op_cost.toFixed(0) + '</span>';
       html += '<tr>';
-      html += '<td style="font-weight:600">' + op.operation + '</td>';
+      html += '<td style="font-weight:600">' + op.operation + opNote + '</td>';
       html += '<td>' + op.setup_hr.toFixed(2) + ' hr</td>';
       html += '<td>' + op.cycle_time_hr.toFixed(4) + ' hr</td>';
       html += '<td>' + op.run_time_hr.toFixed(2) + ' hr</td>';
       html += '<td>$' + op.rate_per_hr.toFixed(0) + '/hr</td>';
       html += '<td style="font-weight:600">$' + op.total_cost.toFixed(2) + '</td>';
       html += '</tr>';
+      // Expandable burden detail row
+      if (op.burden_detail) {
+        var bd = op.burden_detail;
+        var parts = [];
+        if (bd.labor) parts.push('Labor $' + bd.labor.toFixed(0));
+        if (bd.gas_cost) parts.push('Gas $' + bd.gas_cost.toFixed(2));
+        if (bd.electricity) parts.push('Elec $' + bd.electricity.toFixed(2));
+        if (bd.consumables) parts.push('Consumables $' + bd.consumables.toFixed(2));
+        if (bd.depreciation) parts.push('Depr $' + bd.depreciation.toFixed(0));
+        if (bd.abrasive) parts.push('Abrasive $' + bd.abrasive.toFixed(2));
+        if (parts.length) {
+          html += '<tr style="background:#f8faf5"><td colspan="6" style="padding:2px 1rem;font-size:0.72rem;color:#666">';
+          html += 'Rate breakdown: ' + parts.join(' + ') + ' = $' + bd.total.toFixed(0) + '/hr';
+          html += '</td></tr>';
+        }
+      }
+      // Setup detail row
+      if (op.setup_detail && op.setup_detail.items) {
+        var sitems = [];
+        op.setup_detail.items.forEach(function(si) {
+          sitems.push(si.label + ' ' + si.hr.toFixed(2) + 'hr');
+        });
+        if (sitems.length) {
+          html += '<tr style="background:#f8faf5"><td colspan="6" style="padding:2px 1rem;font-size:0.72rem;color:#666">';
+          html += 'Setup: ' + sitems.join(' + ');
+          html += '</td></tr>';
+        }
+      }
     });
     html += '</tbody></table>';
   }
@@ -1322,9 +1367,9 @@ async function loadHistory() {
 // Load history on page load
 loadHistory();
 
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 //  Shop Rates Config Panel
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 var shopConfig = null;
 var configLoaded = false;
@@ -1375,7 +1420,7 @@ var CFG_SCALARS = {
 };
 
 function formatKey(k) {
-  return k.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+  return k.replace(/_/g, ' ').replace(/\|/g, ' | ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
 }
 
 function loadConfig() {
@@ -1572,7 +1617,6 @@ function resetConfig() {
       showCfgStatus('Reset failed: ' + err, false);
     });
 }
-
 
 // --- Import Excel/CSV rates file ---
 function importRatesFile(input) {
@@ -2210,7 +2254,7 @@ def analyze():
     except (json.JSONDecodeError, FileNotFoundError) as e:
         return jsonify({"error": f"Failed to read analysis results: {e}"}), 500
 
-    # -- Cost estimation --
+    # ── Cost estimation (uses saved shop config) ────────────────
     cost_estimate = None
     try:
         cost_geo = _build_cost_geometry(geometry)
@@ -2294,7 +2338,7 @@ def reset_config():
         return jsonify({"error": str(e)}), 500
 
 
-# ââ Sheet name -> config key mapping for Excel import âââââââââââââ
+# ── Sheet name -> config key mapping for Excel import ─────────────
 _SHEET_TO_CONFIG = {
     "machine rates":       "rates",
     "rates":               "rates",
@@ -2601,7 +2645,6 @@ def config_template():
     buf.seek(0)
     return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                      as_attachment=True, download_name="CMC_Shop_Rates_Template.xlsx")
-
 
 
 @app.route("/history")
