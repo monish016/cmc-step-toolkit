@@ -1493,6 +1493,22 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     features = slot_features + [c for c in classified if c is not None]
     unclassified_count = sum(1 for c in classified if c is None)
 
+    # --- DEBUG: feature pipeline stats ---
+    _cyl_cands = [c for c in candidates if c["kind"] == "cyl"]
+    _plan_cands = [c for c in candidates if c["kind"] == "planar"]
+    _cyl_radii = {}
+    for c in _cyl_cands:
+        r_key = round(c["radius"], 3)
+        _cyl_radii[r_key] = _cyl_radii.get(r_key, 0) + 1
+    _cluster_sizes = [len(cl) for cl in clusters]
+    _remaining_sizes = [len(cl) for cl in remaining_clusters]
+    print(f"[DEBUG] candidates: {len(candidates)} total ({len(_cyl_cands)} cyl, {len(_plan_cands)} planar)")
+    print(f"[DEBUG] cyl radii breakdown: {dict(sorted(_cyl_radii.items()))}")
+    print(f"[DEBUG] clusters: {len(clusters)}, sizes: {sorted(_cluster_sizes, reverse=True)[:20]}")
+    print(f"[DEBUG] after slot merge: {len(remaining_clusters)} remaining, {len(slot_features)} slots")
+    print(f"[DEBUG] classified: {len([c for c in classified if c])}, null: {unclassified_count}")
+    print(f"[DEBUG] bend_face_idxs: {len(bend_face_idxs)} faces excluded")
+
     for feat in features:
         cx, cy, cz = feat["center"]
         length_along_axis = project_point_to_axis((cx, cy, cz))
