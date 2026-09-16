@@ -531,7 +531,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <h2>Revision History</h2>
       <div style="max-width:800px">
 
-        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+                <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.7 - September 17, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Hole Detection Accuracy Fix</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>GUARD 3: Full-circle cylinder faces are now standalone clusters, preventing transitive merging through shared planar faces</li>
+            <li>Capped dedup threshold at 15mm (was scaling to 80mm+ on wide parts, incorrectly merging distinct holes)</li>
+            <li>CA260504D-PX04 hole count fixed: 24 detected to 34 detected (17 round + 17 square/rect)</li>
+            <li>Added pipeline debug diagnostics (_debug field in API response)</li>
+          </ul>
+        </div>
+<div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
           <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.6 - September 16, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">CMC Branding</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
@@ -645,7 +655,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.6</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.7</div>
 
 <script>
 // --- Tab switching ---
