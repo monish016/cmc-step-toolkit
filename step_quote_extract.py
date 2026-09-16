@@ -971,7 +971,7 @@ def cluster_features(candidates, thresh=12.0):
             d = math.dist(candidates[i]["center"], candidates[j]["center"])
             ci, cj = candidates[i], candidates[j]
 
-            # GUARD: two full-circle cylinders (sweep > 300 deg) are ALWAYS
+            # GUARD 1: two full-circle cylinders (sweep > 300 deg) are ALWAYS
             # separate holes, never parts of the same feature -- regardless
             # of radius.  Each full-circle cyl is already a complete hole
             # bore wall.  Without this guard, nearby holes (bolt patterns,
@@ -979,6 +979,19 @@ def cluster_features(candidates, thresh=12.0):
             if (ci["kind"] == "cyl" and cj["kind"] == "cyl"
                     and ci.get("u_sweep", 0) > 300 and cj.get("u_sweep", 0) > 300):
                 continue
+
+            # GUARD 2: a full-circle cylinder merges only with faces within
+            # a tight radius proportional to its bore diameter.  This prevents
+            # transitive bridging of separate holes via shared planar faces
+            # (e.g. bolt-pattern holes on the same flat surface all merge
+            # with nearby planar edge-break faces, collapsing into one cluster).
+            ci_full = ci["kind"] == "cyl" and ci.get("u_sweep", 0) > 300
+            cj_full = cj["kind"] == "cyl" and cj.get("u_sweep", 0) > 300
+            if ci_full or cj_full:
+                r_ref = ci["radius"] if ci_full else cj["radius"]
+                tight = min(thresh, 2 * r_ref + 2)
+                if d >= tight:
+                    continue
 
             # For two cylindrical faces with matching radii (split-circle halves),
             # allow larger clustering distance proportional to the radius.
