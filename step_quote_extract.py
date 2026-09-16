@@ -971,28 +971,18 @@ def cluster_features(candidates, thresh=12.0):
             d = math.dist(candidates[i]["center"], candidates[j]["center"])
             ci, cj = candidates[i], candidates[j]
 
-            # GUARD 1: two full-circle cylinders (sweep > 300 deg) are ALWAYS
-            # separate holes, never parts of the same feature -- regardless
-            # of radius.  Each full-circle cyl is already a complete hole
-            # bore wall.  Without this guard, nearby holes (bolt patterns,
-            # etc.) get merged into a single cluster and undercounted.
-            if (ci["kind"] == "cyl" and cj["kind"] == "cyl"
-                    and ci.get("u_sweep", 0) > 300 and cj.get("u_sweep", 0) > 300):
-                continue
-
-            # GUARD 2: a full-circle cylinder merges only with faces within
-            # a tight radius proportional to its bore diameter.  This prevents
-            # transitive bridging of separate holes via shared planar faces
-            # (e.g. bolt-pattern holes on the same flat surface all merge
-            # with nearby planar edge-break faces, collapsing into one cluster).
+            # GUARD 3: A full-circle cylinder (sweep > 300 deg) is already a
+            # complete hole bore wall.  It NEVER merges with any other face.
+            # This prevents transitive bridging where separate holes merge
+            # through shared planar faces via Union-Find (hole A -> planar X
+            # -> planar Y -> hole B).  Guards 1 & 2 (now replaced) only
+            # blocked direct cyl-cyl and limited cyl-planar distance, but
+            # planar-planar bridges were unchecked.  Making full-circle cyls
+            # fully standalone eliminates all transitive paths.
             ci_full = ci["kind"] == "cyl" and ci.get("u_sweep", 0) > 300
             cj_full = cj["kind"] == "cyl" and cj.get("u_sweep", 0) > 300
             if ci_full or cj_full:
-                r_ref = ci["radius"] if ci_full else cj["radius"]
-                tight = min(thresh, 2 * r_ref + 2)
-                if d >= tight:
-                    continue
-
+                continue
             # For two cylindrical faces with matching radii (split-circle halves),
             # allow larger clustering distance proportional to the radius.
             # This catches large holes split into 2x180-deg halves whose face
@@ -1502,12 +1492,20 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         _cyl_radii[r_key] = _cyl_radii.get(r_key, 0) + 1
     _cluster_sizes = [len(cl) for cl in clusters]
     _remaining_sizes = [len(cl) for cl in remaining_clusters]
-    print(f"[DEBUG] candidates: {len(candidates)} total ({len(_cyl_cands)} cyl, {len(_plan_cands)} planar)")
-    print(f"[DEBUG] cyl radii breakdown: {dict(sorted(_cyl_radii.items()))}")
-    print(f"[DEBUG] clusters: {len(clusters)}, sizes: {sorted(_cluster_sizes, reverse=True)[:20]}")
-    print(f"[DEBUG] after slot merge: {len(remaining_clusters)} remaining, {len(slot_features)} slots")
-    print(f"[DEBUG] classified: {len([c for c in classified if c])}, null: {unclassified_count}")
-    print(f"[DEBUG] bend_face_idxs: {len(bend_face_idxs)} faces excluded")
+    _debug_info = {
+        "candidates_total": len(candidates),
+        "candidates_cyl": len(_cyl_cands),
+        "candidates_planar": len(_plan_cands),
+        "cyl_radii_breakdown": {str(k): v for k, v in sorted(_cyl_radii.items())},
+        "num_clusters": len(clusters),
+        "cluster_sizes_top20": sorted(_cluster_sizes, reverse=True)[:20],
+        "after_slot_merge": len(remaining_clusters),
+        "num_slots": len(slot_features),
+        "classified_count": len([c for c in classified if c]),
+        "null_count": unclassified_count,
+        "bend_faces_excluded": len(bend_face_idxs),
+    }
+    print(f"[DEBUG] {_debug_info}", flush=True)
 
     for feat in features:
         cx, cy, cz = feat["center"]
@@ -1561,7 +1559,13 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # are separated by the full part width (~95mm for this geometry).
     _bb_dims = sorted([bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"],
                        bb["zmax"]-bb["zmin"]])
-    _dedup_2d_threshold = max(_bb_dims[1] / 2.5, 15.0)  # at least 15mm
+    # Cap dedup threshold to 15mm.  Previous formula (_bb_dims[1]/2.5) gave
+    # 80mm+ on wide parts, incorrectly merging distinct holes with the same
+    # diameter that happened to share similar L positions.  15mm is generous
+    # for same-hole fragments (which project within ~2mm in 2D) while keeping
+    # distinct holes separate.  The bend-fragmentation force-merge (below)
+    # handles the edge case of >2 fragments with matching u-position.
+    _dedup_2d_threshold = 15.0
 
 
     deduped = []
@@ -1615,6 +1619,9 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # Clean up temp keys
     for f in deduped:
         f.pop("_2d", None)
+    _debug_info["pre_dedup_count"] = _debug_info["classified_count"] + _debug_info["num_slots"]
+    _debug_info["post_dedup_count"] = len(deduped)
+    _debug_info["dedup_2d_threshold_mm"] = round(_dedup_2d_threshold, 1)
     features = deduped
 
     # --- Gauge auto-detection ---
@@ -1690,6 +1697,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             ["tapping (check manually)"] if any(f["type"] == "round" and f.get("diameter_in", 1) < 0.5 for f in features) else []
         ),
         "complexity": _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thickness_mm),
+        "_debug": _debug_info,
     }
 
 
