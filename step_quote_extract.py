@@ -1543,7 +1543,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     _groups = defaultdict(list)
     for f in features:
         k = _feat_key(f)
-        L_bucket = round((f.get("length_in") or 0) * 5) / 5  # 0.2" buckets
+        L_bucket = round((f.get("length_in") or 0) * 10) / 10  # 0.1" buckets
         _groups[(k, L_bucket)].append(f)
 
     # Pre-compute 2D cross-section projections for each feature center
@@ -1563,9 +1563,10 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # 80mm+ on wide parts, incorrectly merging distinct holes with the same
     # diameter that happened to share similar L positions.  15mm is generous
     # for same-hole fragments (which project within ~2mm in 2D) while keeping
-    # distinct holes separate.  The bend-fragmentation force-merge (below)
+    # distinct holes separate even when they are 10-15mm apart in 2D.
+    # The bend-fragmentation force-merge (below)
     # handles the edge case of >2 fragments with matching u-position.
-    _dedup_2d_threshold = 15.0
+    _dedup_2d_threshold = 3.0
 
 
     deduped = []
@@ -1622,6 +1623,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     _debug_info["pre_dedup_count"] = _debug_info["classified_count"] + _debug_info["num_slots"]
     _debug_info["post_dedup_count"] = len(deduped)
     _debug_info["dedup_2d_threshold_mm"] = round(_dedup_2d_threshold, 1)
+    _debug_info["dedup_removed"] = _debug_info["pre_dedup_count"] - len(deduped)
     features = deduped
 
     # --- Gauge auto-detection ---
