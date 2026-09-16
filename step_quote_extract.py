@@ -969,12 +969,22 @@ def cluster_features(candidates, thresh=12.0):
     for i in range(n):
         for j in range(i + 1, n):
             d = math.dist(candidates[i]["center"], candidates[j]["center"])
+            ci, cj = candidates[i], candidates[j]
+
+            # GUARD: two full-circle cylinders (sweep > 300 deg) are ALWAYS
+            # separate holes, never parts of the same feature -- regardless
+            # of radius.  Each full-circle cyl is already a complete hole
+            # bore wall.  Without this guard, nearby holes (bolt patterns,
+            # etc.) get merged into a single cluster and undercounted.
+            if (ci["kind"] == "cyl" and cj["kind"] == "cyl"
+                    and ci.get("u_sweep", 0) > 300 and cj.get("u_sweep", 0) > 300):
+                continue
+
             # For two cylindrical faces with matching radii (split-circle halves),
             # allow larger clustering distance proportional to the radius.
             # This catches large holes split into 2x180-deg halves whose face
             # centers are ~(4/pi)*r apart — much farther than 12mm for big holes.
             eff_thresh = thresh
-            ci, cj = candidates[i], candidates[j]
             if ci["kind"] == "cyl" and cj["kind"] == "cyl":
                 r_spread = abs(ci["radius"] - cj["radius"])
                 if r_spread < 1.0:
