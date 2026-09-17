@@ -743,6 +743,11 @@ def detect_bend_faces(cyl, thickness_hint=None):
         r_in, r_out = min(radii), max(radii)
         angle = max(info["u_sweep_deg"] for _, info in group)
         axis = group[0][1]["axis"]
+        # Bend line length = cylinder length along its axis (v_len)
+        bend_line_length = max(info["v_len"] for _, info in group)
+        # Bend center location
+        locs = [info["loc"] for _, info in group]
+        bend_center = tuple(sum(c[k] for c in locs) / len(locs) for k in range(3))
         bend_lines.append({
             "inner_radius": r_in,
             "outer_radius": r_out,
@@ -750,6 +755,8 @@ def detect_bend_faces(cyl, thickness_hint=None):
             "angle_deg": angle,
             "axis": axis,
             "face_idx": [i for i, _ in group],
+            "bend_line_length_mm": bend_line_length,
+            "center": bend_center,
         })
 
     # Filter out false bends: groups where inner == outer radius (thickness ~ 0)
@@ -983,10 +990,11 @@ def cluster_features(candidates, thresh=12.0):
             cj_full = cj["kind"] == "cyl" and cj.get("u_sweep", 0) > 300
             if ci_full or cj_full:
                 continue
+
             # For two cylindrical faces with matching radii (split-circle halves),
             # allow larger clustering distance proportional to the radius.
             # This catches large holes split into 2x180-deg halves whose face
-            # centers are ~(4/pi)*r apart — much farther than 12mm for big holes.
+            # centers are ~(4/pi)*r apart -- much farther than 12mm for big holes.
             eff_thresh = thresh
             if ci["kind"] == "cyl" and cj["kind"] == "cyl":
                 r_spread = abs(ci["radius"] - cj["radius"])
@@ -1543,7 +1551,7 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     _groups = defaultdict(list)
     for f in features:
         k = _feat_key(f)
-        L_bucket = round((f.get("length_in") or 0) * 10) / 10  # 0.1" buckets
+        L_bucket = round((f.get("length_in") or 0) * 5) / 5  # 0.2" buckets
         _groups[(k, L_bucket)].append(f)
 
     # Pre-compute 2D cross-section projections for each feature center
@@ -1563,11 +1571,9 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # 80mm+ on wide parts, incorrectly merging distinct holes with the same
     # diameter that happened to share similar L positions.  15mm is generous
     # for same-hole fragments (which project within ~2mm in 2D) while keeping
-    # distinct holes separate even when they are 10-15mm apart in 2D.
-    # The bend-fragmentation force-merge (below)
+    # distinct holes separate.  The bend-fragmentation force-merge (below)
     # handles the edge case of >2 fragments with matching u-position.
-    _dedup_2d_threshold = 3.0
-
+    _dedup_2d_threshold = 15.0
 
     deduped = []
     for (_gk, _gL), members in _groups.items():
@@ -1623,7 +1629,6 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     _debug_info["pre_dedup_count"] = _debug_info["classified_count"] + _debug_info["num_slots"]
     _debug_info["post_dedup_count"] = len(deduped)
     _debug_info["dedup_2d_threshold_mm"] = round(_dedup_2d_threshold, 1)
-    _debug_info["dedup_removed"] = _debug_info["pre_dedup_count"] - len(deduped)
     features = deduped
 
     # --- Gauge auto-detection ---
@@ -1682,6 +1687,20 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         "bend_radius_in": round(bend_radius_mm/25.4, 4) if bend_radius_mm else None,
         "num_bends": len(bend_lines),
         "bend_angles_deg": sorted([round(b["angle_deg"],1) for b in bend_lines]),
+        "bend_details": [
+            {
+                "angle_deg": round(b["angle_deg"], 1),
+                "inner_radius_in": round(b["inner_radius"] / 25.4, 4),
+                "bend_line_length_in": round(b.get("bend_line_length_mm", 0) / 25.4, 3),
+                "axis": [round(c, 3) for c in b["axis"]],
+                "direction": (
+                    "along_length" if abs(b["axis"][0]) > 0.7 else
+                    "along_width" if abs(b["axis"][1]) > 0.7 else
+                    "along_depth" if abs(b["axis"][2]) > 0.7 else "oblique"
+                ),
+            }
+            for b in bend_lines
+        ],
         "k_factor_assumed": k_factor,
         "k_factor_source": k_source,
         "k_factor_matched_bend_radius_in": matched_br,
@@ -1699,6 +1718,11 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             ["tapping (check manually)"] if any(f["type"] == "round" and f.get("diameter_in", 1) < 0.5 for f in features) else []
         ),
         "complexity": _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thickness_mm),
+        "nesting": nest_parts(
+            round(flat_width_mm / 25.4, 3) if flat_width_mm > 0 else 0,
+            round(flat_length_mm / 25.4, 3) if flat_length_mm > 0 else 0,
+            1  # default qty=1, frontend can request re-nesting with actual qty
+        ),
         "_debug": _debug_info,
     }
 
@@ -1737,6 +1761,124 @@ def run_machined(shape, solid, envelope, faces_list, planar, cyl, other, machini
         "features_raw_count": len(features),
         "processes": processes,
     }
+
+
+# ==========================================================================
+# MATERIAL NESTING SIMULATION
+# ==========================================================================
+# Standard sheet sizes (width_in x length_in)
+_STANDARD_SHEETS = [
+    (48, 96),    # 4' x 8' (most common)
+    (48, 120),   # 4' x 10'
+    (60, 120),   # 5' x 10'
+    (48, 144),   # 4' x 12'
+    (60, 144),   # 5' x 12'
+]
+
+def nest_parts(flat_w_in, flat_l_in, quantity, sheet_sizes=None, part_gap_in=0.25):
+    """
+    Simple 2D guillotine nesting: pack rectangular flat patterns onto standard sheets.
+    Returns nesting results including utilization, sheets needed, and cost-relevant data.
+
+    part_gap_in: spacing between parts for kerf + handling (default 0.25")
+    """
+    if sheet_sizes is None:
+        sheet_sizes = _STANDARD_SHEETS
+
+    if flat_w_in <= 0 or flat_l_in <= 0 or quantity <= 0:
+        return None
+
+    pw = flat_w_in + part_gap_in
+    pl = flat_l_in + part_gap_in
+
+    best_result = None
+
+    for sw, sl in sheet_sizes:
+        # Try both orientations of the part
+        fits = []
+        for part_w, part_l in [(pw, pl), (pl, pw)]:
+            if part_w > sw or part_l > sl:
+                continue
+            cols = int(sw / part_w)
+            rows = int(sl / part_l)
+            per_sheet = cols * rows
+            if per_sheet > 0:
+                fits.append({
+                    "cols": cols, "rows": rows, "per_sheet": per_sheet,
+                    "part_w": part_w, "part_l": part_l, "rotated": (part_w != pw),
+                })
+
+        if not fits:
+            continue
+
+        best_fit = max(fits, key=lambda f: f["per_sheet"])
+        per_sheet = best_fit["per_sheet"]
+        sheets_needed = math.ceil(quantity / per_sheet)
+        parts_on_last = quantity - (sheets_needed - 1) * per_sheet
+
+        # Utilization calculation
+        part_area = flat_w_in * flat_l_in
+        sheet_area = sw * sl
+        total_part_area = part_area * quantity
+        total_sheet_area = sheet_area * sheets_needed
+        utilization = total_part_area / total_sheet_area if total_sheet_area > 0 else 0
+        scrap_pct = 1.0 - utilization
+
+        # Remnant on last sheet
+        remnant_area = sheet_area - (parts_on_last * part_area)
+
+        result = {
+            "sheet_size_in": f"{sw} x {sl}",
+            "sheet_size_label": f"{sw/12:.0f}' x {sl/12:.0f}'",
+            "sheet_area_sqft": round(sheet_area / 144, 2),
+            "parts_per_sheet": per_sheet,
+            "sheets_needed": sheets_needed,
+            "parts_on_last_sheet": parts_on_last,
+            "utilization_pct": round(utilization * 100, 1),
+            "scrap_pct": round(scrap_pct * 100, 1),
+            "total_sheet_area_sqft": round(total_sheet_area / 144, 2),
+            "total_part_area_sqft": round(total_part_area / 144, 2),
+            "remnant_sqft": round(remnant_area / 144, 2),
+            "layout": {
+                "cols": best_fit["cols"],
+                "rows": best_fit["rows"],
+                "rotated": best_fit["rotated"],
+            },
+            "part_gap_in": part_gap_in,
+        }
+
+        # Pick best: highest utilization
+        if best_result is None or result["utilization_pct"] > best_result["utilization_pct"]:
+            best_result = result
+
+    # Also compute all sheet options for comparison
+    if best_result:
+        all_options = []
+        for sw, sl in sheet_sizes:
+            for part_w, part_l in [(pw, pl), (pl, pw)]:
+                if part_w > sw or part_l > sl:
+                    continue
+                cols = int(sw / part_w)
+                rows = int(sl / part_l)
+                per_sheet = cols * rows
+                if per_sheet > 0:
+                    sn = math.ceil(quantity / per_sheet)
+                    util = (flat_w_in * flat_l_in * quantity) / (sw * sl * sn)
+                    all_options.append({
+                        "sheet": f"{sw/12:.0f}' x {sl/12:.0f}'",
+                        "per_sheet": per_sheet,
+                        "sheets": sn,
+                        "utilization_pct": round(util * 100, 1),
+                    })
+        # Remove duplicates (same sheet, keep best per_sheet)
+        seen = {}
+        for opt in all_options:
+            key = opt["sheet"]
+            if key not in seen or opt["per_sheet"] > seen[key]["per_sheet"]:
+                seen[key] = opt
+        best_result["all_options"] = sorted(seen.values(), key=lambda x: -x["utilization_pct"])
+
+    return best_result
 
 
 if __name__ == "__main__":

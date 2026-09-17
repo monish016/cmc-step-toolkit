@@ -250,6 +250,8 @@ def _build_cost_geometry(geometry):
         "material_removal_ratio": geometry.get("material_removal_ratio", 0),
         "gauge_num": gauge_num,
         "features_list": features,
+        "bend_details": geometry.get("bend_details", []),
+        "nesting": geometry.get("nesting", None),
     }
 
 
@@ -531,17 +533,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <h2>Revision History</h2>
       <div style="max-width:800px">
 
-                <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.8 - September 17, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Bend Detection, Quote PDF Export, Material Nesting</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Auto-detect bends from STEP geometry with per-bend angle, radius, length, and direction</li>
+            <li>Bend Schedule table in results showing detailed bend-by-bend breakdown</li>
+            <li>One-click Customer Quote PDF export with CMC branding, cost breakdown, and bend schedule</li>
+            <li>Material nesting simulation across 5 standard sheet sizes (4x8 through 5x12)</li>
+            <li>Nesting comparison table with utilization %, layout, and scrap estimates</li>
+            <li>Quantity-aware nesting recalculation for batch runs</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
           <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.7 - September 17, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Hole Detection Accuracy Fix</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>GUARD 3: Full-circle cylinder faces are now standalone clusters, preventing transitive merging through shared planar faces</li>
             <li>Capped dedup threshold at 15mm (was scaling to 80mm+ on wide parts, incorrectly merging distinct holes)</li>
-            <li>CA260504D-PX04 hole count fixed: 24 detected to 34 detected (17 round + 17 square/rect)</li>
+            <li>CA260504D-PX04 hole count fixed: 24 detected -> 34 detected (17 round + 17 square/rect)</li>
             <li>Added pipeline debug diagnostics (_debug field in API response)</li>
           </ul>
         </div>
-<div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
           <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.6 - September 16, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">CMC Branding</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
@@ -655,7 +671,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.7</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.8</div>
 
 <script>
 // --- Tab switching ---
@@ -932,6 +948,7 @@ function renderResults(results) {
     // Download buttons
     html += '<div class="dl-row">' +
       '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download PDF Report</a>' +
+      '<button class="dl-btn" style="background:#1a5a1a" onclick="downloadQuotePDF(' + idx + ')">Download Customer Quote</button>' +
       '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download JSON</a>' +
       '<button class="dl-btn secondary" onclick="exportCSV(' + idx + ')">Export CSV</button>' +
       '<button class="dl-btn secondary" onclick="printQuote(' + idx + ')">Print Quote</button>' +
@@ -983,7 +1000,7 @@ function renderSheetMetal(g, env, dims) {
   }
 
   html += '<table class="detail-table">' +
-    '<tr><th>Bend radius</th><td>' + g.bend_radius_in + '"</td></tr>' +
+    '<tr><th>Bend radius</th><td>' + (g.bend_radius_in ? g.bend_radius_in + '"' : 'N/A') + '</td></tr>' +
     '<tr><th>Bend angles</th><td>' + (g.bend_angles_deg.length ? g.bend_angles_deg.join(", ") + '&deg;' : 'None') + '</td></tr>' +
     '<tr><th title="Neutral axis offset factor used for flat pattern development">K-factor used</th><td>' + g.k_factor_assumed + ' <span style="color:#888;font-size:0.85em">(' + (g.k_factor_source || 'default') + ')</span></td></tr>' +
     '<tr><th>Mass</th><td>' + env.mass_lb.toFixed(2) + ' lb / ' + env.mass_kg.toFixed(3) + ' kg</td></tr>' +
@@ -1025,22 +1042,43 @@ function renderSheetMetal(g, env, dims) {
     html += '<div style="color:#888;margin:0.8rem 0">No cut features detected</div>';
   }
 
+  // Bend Schedule (detailed per-bend table)
+  if (g.bend_details && g.bend_details.length > 0) {
+    html += '<div style="margin:1rem 0"><h4 style="color:#1a3a1a;margin-bottom:0.5rem">Bend Schedule (' + g.bend_details.length + ' bends)</h4>';
+    html += '<table class="detail-table" style="font-size:0.85rem"><thead><tr><th>#</th><th>Angle</th><th>Radius</th><th>Bend Length</th><th>Direction</th></tr></thead><tbody>';
+    g.bend_details.forEach(function(bd, i) {
+      var dir = (bd.direction || '---').replace(/_/g, ' ');
+      dir = dir.charAt(0).toUpperCase() + dir.slice(1);
+      html += '<tr><td>' + (i+1) + '</td><td>' + bd.angle_deg + '&deg;</td><td>' + bd.inner_radius_in.toFixed(4) + '"</td><td>' + bd.bend_line_length_in.toFixed(3) + '"</td><td>' + dir + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
   // Nesting estimate
   var fw = parseFloat(g.flat_width_in) || 0;
   var fl = parseFloat(g.flat_length_in) || 0;
   if (fw > 0 && fl > 0) {
-    var sheets = [[48,96,"48 x 96"],[48,120,"48 x 120"],[60,120,"60 x 120"]];
-    var gap = 0.25; // kerf + spacing
+    var sheets = [[48,96,"48 x 96"],[48,120,"48 x 120"],[60,120,"60 x 120"],[48,144,"48 x 144"],[60,144,"60 x 144"]];
+    var gap = 0.25;
     var pw = fw + gap;
     var pl = fl + gap;
-    html += '<div class="nesting-box"><h4>Nesting Estimate</h4><table class="detail-table"><tr><th>Sheet Size</th><th>Orientation A</th><th>Orientation B</th><th>Best Fit</th></tr>';
+    html += '<div class="nesting-box"><h4 style="color:#1a3a1a">Material Nesting</h4>';
+    html += '<table class="detail-table"><thead><tr><th>Sheet Size</th><th>Parts/Sheet</th><th>Layout</th><th>Utilization</th></tr></thead><tbody>';
     sheets.forEach(function(s) {
       var nA = Math.floor(s[0]/pw) * Math.floor(s[1]/pl);
       var nB = Math.floor(s[0]/pl) * Math.floor(s[1]/pw);
       var best = Math.max(nA, nB);
-      html += '<tr><td>' + s[2] + '"</td><td>' + nA + ' pcs</td><td>' + nB + ' pcs</td><td><strong>' + best + ' pcs</strong></td></tr>';
+      var colsA = Math.floor(s[0]/pw), rowsA = Math.floor(s[1]/pl);
+      var colsB = Math.floor(s[0]/pl), rowsB = Math.floor(s[1]/pw);
+      var cols, rows;
+      if (nA >= nB) { cols = colsA; rows = rowsA; } else { cols = colsB; rows = rowsB; }
+      var util = best > 0 ? ((fw * fl * best) / (s[0] * s[1]) * 100).toFixed(1) : '0.0';
+      var utilColor = parseFloat(util) > 70 ? '#2a5a2a' : (parseFloat(util) > 50 ? '#b8860b' : '#c00');
+      if (best > 0) {
+        html += '<tr><td>' + s[2] + '"</td><td><strong>' + best + ' pcs</strong></td><td>' + cols + ' x ' + rows + '</td><td><span style="color:' + utilColor + ';font-weight:600">' + util + '%</span></td></tr>';
+      }
     });
-    html += '</table><div style="color:#888;font-size:0.8em;margin-top:4px">0.25" kerf/gap assumed</div></div>';
+    html += '</tbody></table><div style="color:#888;font-size:0.8em;margin-top:4px">0.25" kerf/gap assumed. Flat pattern: ' + fw.toFixed(3) + '" x ' + fl.toFixed(3) + '"</div></div>';
   }
   return html;
 }
@@ -1458,6 +1496,17 @@ function printQuote(idx) {
   w.document.write('</body></html>');
   w.document.close();
   w.print();
+}
+
+function downloadQuotePDF(idx) {
+  var r = _allResults.filter(function(x){return !x.error;})[idx] || _allResults[idx];
+  if (!r || !r.job_id) { alert("No job data available for PDF export."); return; }
+  var mat = document.getElementById("material");
+  var qty = document.getElementById("quantity");
+  var material = mat ? mat.value : "mild_steel";
+  var quantity = qty ? qty.value : "1";
+  var url = "/quote-pdf/" + r.job_id + "?material=" + encodeURIComponent(material) + "&quantity=" + encodeURIComponent(quantity);
+  window.open(url, "_blank");
 }
 
 // --- History ---
@@ -2432,10 +2481,372 @@ def analyze():
     except Exception as db_err:
         print(f"Warning: Failed to save job to DB: {db_err}")
 
+    # Re-run nesting with actual quantity
+    nesting_result = geometry.get("nesting", None)
+    if quantity > 1 and geometry.get("flat_width_in") and geometry.get("flat_length_in"):
+        try:
+            from step_quote_extract import nest_parts
+            nesting_result = nest_parts(
+                geometry["flat_width_in"], geometry["flat_length_in"], quantity
+            )
+        except Exception as ne:
+            print(f"Warning: Nesting recalc failed: {ne}")
+
     resp = {"geometry": geometry, "files": files, "job_id": job_id}
     if cost_estimate:
         resp["cost_estimate"] = cost_estimate
+    if nesting_result:
+        resp["nesting"] = nesting_result
     return jsonify(resp)
+
+
+@app.route("/quote-pdf/<job_id>")
+def generate_quote_pdf(job_id):
+    """Generate a CMC-branded customer-facing quote PDF."""
+    job_dir = os.path.join(app.config["UPLOAD_FOLDER"], job_id)
+    json_path = os.path.join(job_dir, "geometry_extract.json")
+
+    if not os.path.exists(json_path):
+        return jsonify({"error": "Job not found"}), 404
+
+    try:
+        with open(json_path) as f:
+            geometry = json.load(f)
+    except Exception as e:
+        return jsonify({"error": f"Failed to read job data: {e}"}), 500
+
+    # Get parameters from query string
+    material_name = request.args.get("material", "Mild/Carbon Steel")
+    try:
+        quantity = max(1, int(request.args.get("quantity", "1")))
+    except (ValueError, TypeError):
+        quantity = 1
+    customer_name = request.args.get("customer", "")
+    po_number = request.args.get("po", "")
+    notes = request.args.get("notes", "")
+
+    # Build cost estimate
+    cost_estimate = None
+    try:
+        cost_geo = _build_cost_geometry(geometry)
+        shop_config = _get_config()
+        cost_estimate = cost_engine.estimate_cost(cost_geo, material_name, quantity, config=shop_config)
+    except Exception as ce:
+        print(f"Warning: Cost estimation for quote PDF failed: {ce}")
+
+    # Nesting
+    nesting_result = None
+    if geometry.get("flat_width_in") and geometry.get("flat_length_in"):
+        try:
+            from step_quote_extract import nest_parts
+            nesting_result = nest_parts(
+                geometry["flat_width_in"], geometry["flat_length_in"], quantity
+            )
+        except Exception:
+            pass
+
+    # Generate the PDF
+    quote_path = os.path.join(job_dir, "customer_quote.pdf")
+    try:
+        _generate_customer_quote_pdf(
+            geometry, cost_estimate, nesting_result,
+            material_name, quantity, customer_name, po_number, notes,
+            quote_path, job_id
+        )
+    except Exception as e:
+        return jsonify({"error": f"PDF generation failed: {e}"}), 500
+
+    return send_file(quote_path, mimetype="application/pdf", as_attachment=True,
+                     download_name=f"CMC_Quote_{job_id}.pdf")
+
+
+def _generate_customer_quote_pdf(geometry, cost_est, nesting, material, qty,
+                                  customer, po, notes, out_path, job_id):
+    """Build a CMC-branded customer quote PDF using reportlab."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib.colors import HexColor, white, black
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable
+    )
+    from reportlab.lib import colors
+
+    CMC_GREEN = HexColor("#1a3a1a")
+    CMC_LIGHT = HexColor("#f0f7f0")
+    BORDER = HexColor("#d0d8d0")
+
+    styles = getSampleStyleSheet()
+    title_s = ParagraphStyle('QTitle', parent=styles['Title'], fontSize=20,
+                             textColor=CMC_GREEN, fontName='Helvetica-Bold', spaceAfter=4)
+    sub_s = ParagraphStyle('QSub', parent=styles['Normal'], fontSize=11,
+                           textColor=HexColor("#4a5a4a"), fontName='Helvetica')
+    head_s = ParagraphStyle('QHead', parent=styles['Heading2'], fontSize=13,
+                            textColor=CMC_GREEN, fontName='Helvetica-Bold',
+                            spaceBefore=14, spaceAfter=6)
+    body_s = ParagraphStyle('QBody', parent=styles['Normal'], fontSize=10,
+                            leading=14, fontName='Helvetica')
+    bold_s = ParagraphStyle('QBold', parent=body_s, fontName='Helvetica-Bold')
+    right_s = ParagraphStyle('QRight', parent=body_s, alignment=TA_RIGHT)
+    right_bold = ParagraphStyle('QRightBold', parent=bold_s, alignment=TA_RIGHT)
+    small_s = ParagraphStyle('QSmall', parent=styles['Normal'], fontSize=8.5,
+                             textColor=HexColor("#666666"), fontName='Helvetica')
+
+    def header_footer(canvas, doc):
+        canvas.saveState()
+        # Green header bar
+        canvas.setFillColor(CMC_GREEN)
+        canvas.rect(0, letter[1] - 50, letter[0], 50, fill=True, stroke=False)
+        canvas.setFillColor(white)
+        canvas.setFont('Helvetica-Bold', 14)
+        canvas.drawString(50, letter[1] - 35, "CMC Manufacturing")
+        canvas.setFont('Helvetica', 9)
+        canvas.drawRightString(letter[0] - 50, letter[1] - 30, "Sales Quotation")
+        canvas.drawRightString(letter[0] - 50, letter[1] - 42, f"Quote #{job_id[:8].upper()}")
+        # Footer
+        canvas.setStrokeColor(BORDER)
+        canvas.setLineWidth(0.5)
+        canvas.line(50, 45, letter[0] - 50, 45)
+        canvas.setFont('Helvetica', 7.5)
+        canvas.setFillColor(HexColor("#888888"))
+        canvas.drawString(50, 32, "CMC Manufacturing - Precision Sheet Metal & Machining")
+        canvas.drawRightString(letter[0] - 50, 32, f"Page {doc.page}")
+        canvas.drawCentredString(letter[0]/2, 32,
+            "This quote is valid for 30 days from the date of issue.")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(out_path, pagesize=letter,
+                            topMargin=70, bottomMargin=65,
+                            leftMargin=50, rightMargin=50)
+    story = []
+
+    # Quote header info
+    from datetime import datetime as dt
+    today = dt.now().strftime("%B %d, %Y")
+
+    info_data = [
+        [Paragraph("<b>Date:</b>", body_s), Paragraph(today, body_s),
+         Paragraph("<b>Quote #:</b>", body_s), Paragraph(job_id[:8].upper(), body_s)],
+        [Paragraph("<b>Customer:</b>", body_s), Paragraph(customer or "---", body_s),
+         Paragraph("<b>PO #:</b>", body_s), Paragraph(po or "---", body_s)],
+        [Paragraph("<b>Material:</b>", body_s), Paragraph(material, body_s),
+         Paragraph("<b>Quantity:</b>", body_s), Paragraph(str(qty), body_s)],
+    ]
+    t = Table(info_data, colWidths=[1.0*inch, 2.0*inch, 1.0*inch, 2.0*inch])
+    t.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 10))
+    story.append(HRFlowable(width="100%", thickness=1, color=CMC_GREEN))
+    story.append(Spacer(1, 8))
+
+    # Part details
+    story.append(Paragraph("Part Details", head_s))
+    env = geometry.get("envelope", {})
+    bbox = env.get("bbox_mm", {})
+    fab_type = geometry.get("fab_type", "sheet_metal")
+    fab_label = "Sheet Metal" if fab_type == "sheet_metal" else "Machined"
+
+    part_rows = [
+        [Paragraph("<b>Property</b>", bold_s), Paragraph("<b>Value</b>", bold_s)],
+        [Paragraph("Fab Type", body_s), Paragraph(fab_label, body_s)],
+    ]
+    if bbox:
+        dims = f'{bbox.get("xlen",0)/25.4:.2f}" x {bbox.get("ylen",0)/25.4:.2f}" x {bbox.get("zlen",0)/25.4:.2f}"'
+        part_rows.append([Paragraph("Dimensions", body_s), Paragraph(dims, body_s)])
+    if geometry.get("thickness_in"):
+        gauge = f' ({geometry["gauge"]} GA)' if geometry.get("gauge") else ''
+        part_rows.append([Paragraph("Thickness", body_s),
+                         Paragraph(f'{geometry["thickness_in"]}"{gauge}', body_s)])
+    if env.get("mass_lb"):
+        part_rows.append([Paragraph("Weight", body_s),
+                         Paragraph(f'{env["mass_lb"]:.2f} lb', body_s)])
+    if geometry.get("num_bends", 0) > 0:
+        angles = geometry.get("bend_angles_deg", [])
+        angle_str = ", ".join(f"{a} deg" for a in angles)
+        part_rows.append([Paragraph("Bends", body_s),
+                         Paragraph(f'{geometry["num_bends"]} ({angle_str})', body_s)])
+    if geometry.get("flat_width_in"):
+        part_rows.append([Paragraph("Flat Pattern", body_s),
+                         Paragraph(f'{geometry["flat_width_in"]}" x {geometry.get("flat_length_in", "-")}"', body_s)])
+
+    features = geometry.get("features", [])
+    if features:
+        round_ct = sum(1 for f in features if f.get("type") == "round")
+        rect_ct = sum(1 for f in features if f.get("type") == "square_or_rect")
+        slot_ct = sum(1 for f in features if f.get("type") == "slot")
+        other_ct = len(features) - round_ct - rect_ct - slot_ct
+        feat_str = []
+        if round_ct: feat_str.append(f"{round_ct} round")
+        if rect_ct: feat_str.append(f"{rect_ct} rectangular")
+        if slot_ct: feat_str.append(f"{slot_ct} slot")
+        if other_ct: feat_str.append(f"{other_ct} other")
+        part_rows.append([Paragraph("Features", body_s),
+                         Paragraph(f'{len(features)} total ({", ".join(feat_str)})', body_s)])
+
+    t = Table(part_rows, colWidths=[2.0*inch, 4.2*inch])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), CMC_GREEN),
+        ('TEXTCOLOR', (0, 0), (-1, 0), white),
+        ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, CMC_LIGHT]),
+        ('TOPPADDING', (0,0), (-1,-1), 5),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ('LEFTPADDING', (0,0), (-1,-1), 8),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 12))
+
+    # Bend details table (if bends exist)
+    bend_details = geometry.get("bend_details", [])
+    if bend_details:
+        story.append(Paragraph("Bend Schedule", head_s))
+        bend_rows = [
+            [Paragraph("<b>#</b>", bold_s), Paragraph("<b>Angle</b>", bold_s),
+             Paragraph("<b>Radius</b>", bold_s), Paragraph("<b>Length</b>", bold_s),
+             Paragraph("<b>Direction</b>", bold_s)]
+        ]
+        for i, bd in enumerate(bend_details, 1):
+            bend_rows.append([
+                Paragraph(str(i), body_s),
+                Paragraph(f'{bd["angle_deg"]} deg', body_s),
+                Paragraph(f'{bd["inner_radius_in"]:.4f}"', body_s),
+                Paragraph(f'{bd["bend_line_length_in"]:.3f}"', body_s),
+                Paragraph(bd.get("direction", "---").replace("_", " ").title(), body_s),
+            ])
+        t = Table(bend_rows, colWidths=[0.5*inch, 1.2*inch, 1.2*inch, 1.2*inch, 1.5*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), CMC_GREEN),
+            ('TEXTCOLOR', (0, 0), (-1, 0), white),
+            ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, CMC_LIGHT]),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('ALIGN', (0,0), (0,-1), 'CENTER'),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 12))
+
+    # Cost breakdown
+    if cost_est:
+        story.append(Paragraph("Cost Estimate", head_s))
+        ops = cost_est.get("operations", [])
+        cost_rows = [
+            [Paragraph("<b>Operation</b>", bold_s), Paragraph("<b>Time</b>", bold_s),
+             Paragraph("<b>Rate</b>", bold_s), Paragraph("<b>Cost</b>", right_bold)]
+        ]
+        for op in ops:
+            t_hr = op.get("time_hr", 0)
+            rate = op.get("rate_per_hr", 0)
+            cost = op.get("cost", 0)
+            time_str = f'{t_hr*60:.1f} min' if t_hr < 1 else f'{t_hr:.2f} hr'
+            cost_rows.append([
+                Paragraph(op.get("operation", ""), body_s),
+                Paragraph(time_str, body_s),
+                Paragraph(f'${rate:.0f}/hr' if rate else '---', body_s),
+                Paragraph(f'${cost:.2f}', right_s),
+            ])
+
+        # Totals
+        unit_cost = cost_est.get("unit_cost", 0)
+        total_cost = cost_est.get("total_cost", 0)
+        mat_cost = cost_est.get("material_cost", 0)
+
+        cost_rows.append([Paragraph("", body_s), Paragraph("", body_s),
+                         Paragraph("<b>Material:</b>", bold_s),
+                         Paragraph(f'<b>${mat_cost:.2f}</b>', right_bold)])
+        cost_rows.append([Paragraph("", body_s), Paragraph("", body_s),
+                         Paragraph("<b>Unit Cost:</b>", bold_s),
+                         Paragraph(f'<b>${unit_cost:.2f}</b>', right_bold)])
+        if qty > 1:
+            cost_rows.append([Paragraph("", body_s), Paragraph("", body_s),
+                             Paragraph(f"<b>Total ({qty} pcs):</b>", bold_s),
+                             Paragraph(f'<b>${total_cost:.2f}</b>', right_bold)])
+
+        t = Table(cost_rows, colWidths=[2.2*inch, 1.2*inch, 1.2*inch, 1.6*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), CMC_GREEN),
+            ('TEXTCOLOR', (0, 0), (-1, 0), white),
+            ('GRID', (0, 0), (-1, len(ops)), 0.5, BORDER),
+            ('ROWBACKGROUNDS', (0, 1), (-1, len(ops)), [colors.white, CMC_LIGHT]),
+            ('TOPPADDING', (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('LINEABOVE', (2, len(ops)+1), (-1, len(ops)+1), 1, CMC_GREEN),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 12))
+
+    # Nesting info
+    if nesting:
+        story.append(Paragraph("Material Nesting", head_s))
+        nest_rows = [
+            [Paragraph("<b>Parameter</b>", bold_s), Paragraph("<b>Value</b>", bold_s)],
+            [Paragraph("Best Sheet Size", body_s), Paragraph(nesting["sheet_size_label"], body_s)],
+            [Paragraph("Parts per Sheet", body_s), Paragraph(str(nesting["parts_per_sheet"]), body_s)],
+            [Paragraph("Sheets Needed", body_s), Paragraph(str(nesting["sheets_needed"]), body_s)],
+            [Paragraph("Material Utilization", body_s), Paragraph(f'{nesting["utilization_pct"]}%', body_s)],
+            [Paragraph("Scrap", body_s), Paragraph(f'{nesting["scrap_pct"]}%', body_s)],
+        ]
+        t = Table(nest_rows, colWidths=[2.5*inch, 3.0*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), CMC_GREEN),
+            ('TEXTCOLOR', (0, 0), (-1, 0), white),
+            ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, CMC_LIGHT]),
+            ('TOPPADDING', (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+            ('LEFTPADDING', (0,0), (-1,-1), 8),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 12))
+
+    # Notes
+    if notes:
+        story.append(Paragraph("Notes", head_s))
+        story.append(Paragraph(notes, body_s))
+        story.append(Spacer(1, 12))
+
+    # Terms
+    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "Terms: Net 30. FOB Origin. Quote valid 30 days. "
+        "Pricing based on quantities shown; changes in quantity, material, or specifications "
+        "may affect pricing. Raw material pricing subject to market conditions at time of order.",
+        small_s
+    ))
+
+    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
+
+
+@app.route("/nest", methods=["POST"])
+def recalculate_nesting():
+    """Recalculate nesting with given flat dimensions and quantity."""
+    try:
+        data = request.get_json(force=True)
+        flat_w = float(data.get("flat_width_in", 0))
+        flat_l = float(data.get("flat_length_in", 0))
+        qty = max(1, int(data.get("quantity", 1)))
+        gap = float(data.get("gap_in", 0.25))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid parameters"}), 400
+
+    try:
+        from step_quote_extract import nest_parts
+        result = nest_parts(flat_w, flat_l, qty, part_gap_in=gap)
+        if result:
+            return jsonify(result)
+        else:
+            return jsonify({"error": "Part does not fit any standard sheet"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/config", methods=["GET"])
