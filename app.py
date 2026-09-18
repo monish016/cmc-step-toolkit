@@ -935,6 +935,15 @@ function renderResults(results) {
       '<h3>' + r.filename + '</h3><div><span class="badge" style="background:' + confColor + '">' + fabLabel + subType + '</span> <span class="badge">OK</span></div></div>' +
       '<div class="result-body" id="result-' + idx + '">';
 
+    // Surface model warning banner
+    if (g.is_surface_model) {
+      html += '<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem">' +
+        '<span style="font-size:1.2rem">&#9888;</span>' +
+        '<div><strong>Surface Model</strong> - This file contains surfaces/wireframes without solid geometry. ' +
+        'Dimensions and features were extracted from surface data. Volume and weight are estimates. ' +
+        'For full accuracy, re-export from CAD as a solid body STEP file.</div></div>';
+    }
+
     if (fabType === 'sheet_metal') {
       html += renderSheetMetal(g, env, dims);
     } else {
@@ -1015,10 +1024,10 @@ function renderSheetMetal(g, env, dims) {
 
   html += '<table class="detail-table">' +
     '<tr><th>Bend radius</th><td>' + (g.bend_radius_in ? g.bend_radius_in + '"' : 'N/A') + '</td></tr>' +
-    '<tr><th>Bend angles</th><td>' + (g.bend_angles_deg.length ? g.bend_angles_deg.join(", ") + '&deg;' : 'None') + '</td></tr>' +
-    '<tr><th title="Neutral axis offset factor used for flat pattern development">K-factor used</th><td>' + g.k_factor_assumed + ' <span style="color:#888;font-size:0.85em">(' + (g.k_factor_source || 'default') + ')</span></td></tr>' +
-    '<tr><th>Mass</th><td>' + env.mass_lb.toFixed(2) + ' lb / ' + env.mass_kg.toFixed(3) + ' kg</td></tr>' +
-    '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm&sup3;</td></tr>' +
+    '<tr><th>Bend angles</th><td>' + (g.bend_angles_deg && g.bend_angles_deg.length ? g.bend_angles_deg.join(", ") + '&deg;' : 'None') + '</td></tr>' +
+    '<tr><th title="Neutral axis offset factor used for flat pattern development">K-factor used</th><td>' + (g.k_factor_assumed || 'N/A') + ' <span style="color:#888;font-size:0.85em">(' + (g.k_factor_source || (g.is_surface_model ? 'surface model' : 'default')) + ')</span></td></tr>' +
+    '<tr><th>Mass</th><td>' + env.mass_lb.toFixed(2) + ' lb / ' + env.mass_kg.toFixed(3) + ' kg' + (env.volume_estimated ? ' <span style="color:#b8860b;font-size:0.85em">(estimated)</span>' : '') + '</td></tr>' +
+    '<tr><th>Volume</th><td>' + env.volume_mm3.toFixed(1) + ' mm&sup3;' + (env.volume_estimated ? ' <span style="color:#b8860b;font-size:0.85em">(estimated)</span>' : '') + '</td></tr>' +
     '<tr><th>Surface area</th><td>' + env.area_mm2.toFixed(1) + ' mm&sup2;</td></tr>' +
     '</table>';
 
@@ -2611,18 +2620,24 @@ def analyze():
             print(f"Warning: View generation failed (non-fatal): {view_err}")
             os.makedirs(views_dir, exist_ok=True)
 
-        # 3. flat pattern
-        subprocess.run([
-            "python3", os.path.join(script_dir, "render_flat_pattern.py"),
-            json_path, "--out", flat_path
-        ], check=True, capture_output=True, text=True, timeout=60)
+        # 3. flat pattern (non-fatal for surface models)
+        try:
+            subprocess.run([
+                "python3", os.path.join(script_dir, "render_flat_pattern.py"),
+                json_path, "--out", flat_path
+            ], check=True, capture_output=True, text=True, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, Exception) as fp_err:
+            print(f"Warning: Flat pattern generation failed (non-fatal): {fp_err}")
 
-        # 4. report PDF
-        subprocess.run([
-            "python3", os.path.join(script_dir, "generate_report.py"),
-            json_path, "--views", views_dir,
-            "--flatpattern", flat_path, "--out", report_path
-        ], check=True, capture_output=True, text=True, timeout=60)
+        # 4. report PDF (non-fatal for surface models)
+        try:
+            subprocess.run([
+                "python3", os.path.join(script_dir, "generate_report.py"),
+                json_path, "--views", views_dir,
+                "--flatpattern", flat_path, "--out", report_path
+            ], check=True, capture_output=True, text=True, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, Exception) as rpt_err:
+            print(f"Warning: Report PDF generation failed (non-fatal): {rpt_err}")
 
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or "").strip()

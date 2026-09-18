@@ -26,8 +26,10 @@ from OCP.GeomAbs import (GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone,
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
 from OCP.gp import gp_Pln, gp_Pnt, gp_Dir
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_EDGE
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL
 from OCP.TopoDS import TopoDS
+from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid
+from OCP.ShapeFix import ShapeFix_Solid
 
 # ==========================================================================
 # CMC K-FACTOR LOOKUP TABLES
@@ -190,13 +192,63 @@ def lookup_k_factor(thickness_in, bend_radius_in=None, material="steel"):
 # --------------------------------------------------------------------------
 # 1. LOAD + ENVELOPE
 # --------------------------------------------------------------------------
+def _try_sew_to_solid(shape):
+    """Attempt to sew loose faces/shells into a closed solid."""
+    try:
+        sewer = BRepBuilderAPI_Sewing(1e-3)
+        # Feed all faces from the shape into the sewer
+        explorer = TopExp_Explorer(shape.wrapped, TopAbs_FACE)
+        face_count = 0
+        while explorer.More():
+            sewer.Add(explorer.Current())
+            face_count += 1
+            explorer.Next()
+        if face_count < 3:
+            return None  # too few faces for a solid
+        sewer.Perform()
+        sewn = sewer.SewedShape()
+        if sewn is None:
+            return None
+        # Try to extract shells from the sewn shape, then make solid
+        shell_exp = TopExp_Explorer(sewn, TopAbs_SHELL)
+        while shell_exp.More():
+            shell = TopoDS.Shell_s(shell_exp.Current())
+            try:
+                maker = BRepBuilderAPI_MakeSolid(shell)
+                if maker.IsDone():
+                    solid = maker.Solid()
+                    # Fix the solid orientation
+                    fixer = ShapeFix_Solid(solid)
+                    fixer.Perform()
+                    fixed = fixer.Solid()
+                    vol = abs(cq.Shape(fixed).Volume())
+                    if vol > 1e-6:
+                        print(f"Surface sewing succeeded: {face_count} faces sewn into solid (vol={vol:.1f} mm3)")
+                        return cq.Shape(fixed)
+            except Exception:
+                pass
+            shell_exp.Next()
+        return None
+    except Exception as e:
+        print(f"Surface sewing failed: {e}")
+        return None
+
+
 def load_step(path):
     shape = importers.importStep(path)
     # Handle assemblies: if the STEP file contains multiple solids,
     # fuse them or pick the largest by volume.
     solids = shape.solids().vals()
     if not solids:
-        raise ValueError("STEP file contains no solid bodies — possibly a wireframe or surface model.")
+        # No solids found -- try to sew surfaces/shells into a solid
+        print("No solid bodies found. Attempting surface sewing...")
+        sewn_solid = _try_sew_to_solid(shape)
+        if sewn_solid is not None:
+            print("Surface sewing produced a valid solid.")
+            return shape, sewn_solid
+        # Sewing failed -- return shape with None solid for surface-only analysis
+        print("Surface sewing did not produce a valid solid. Using surface-only analysis.")
+        return shape, None
     if len(solids) == 1:
         solid = solids[0]
     else:
@@ -207,20 +259,43 @@ def load_step(path):
     return shape, solid
 
 
-def get_envelope(solid, density_g_cm3=7.9):
-    bb = solid.BoundingBox()
-    vol_mm3 = abs(solid.Volume())  # abs() guards against reversed normals
-    if vol_mm3 < 1e-6:
-        raise ValueError("Solid has near-zero volume — degenerate or empty geometry.")
+def get_envelope(solid, density_g_cm3=7.9, shape=None):
+    """Get envelope data. If solid is None (surface model), compute from shape faces."""
+    if solid is not None:
+        bb = solid.BoundingBox()
+        vol_mm3 = abs(solid.Volume())  # abs() guards against reversed normals
+        if vol_mm3 < 1e-6:
+            raise ValueError("Solid has near-zero volume — degenerate or empty geometry.")
+        area_mm2 = 0
+        try:
+            faces = cq.Workplane().add(solid).faces().vals()
+            area_mm2 = sum(abs(f.Area()) for f in faces)
+        except Exception:
+            pass
+    else:
+        # Surface-only: get bounding box and area from shape faces
+        if shape is None:
+            raise ValueError("No solid and no shape available for analysis.")
+        bb = shape.BoundingBox()
+        vol_mm3 = 0.0
+        area_mm2 = 0
+        try:
+            faces = shape.faces().vals()
+            area_mm2 = sum(abs(f.Area()) for f in faces)
+            # Estimate volume from bounding box and surface area
+            # For a surface model, we estimate using the thinnest dimension
+            dims = sorted([max(bb.xlen, 1e-6), max(bb.ylen, 1e-6), max(bb.zlen, 1e-6)])
+            # Estimate: area of large faces * thickness (thinnest dim)
+            vol_mm3 = area_mm2 / 2.0 * dims[0]  # rough estimate
+        except Exception:
+            pass
+        if vol_mm3 < 1e-6:
+            # Fallback: use bounding box volume * fill factor
+            vol_mm3 = max(bb.xlen, 1e-6) * max(bb.ylen, 1e-6) * max(bb.zlen, 1e-6) * 0.3
+
     vol_cm3 = vol_mm3 / 1000.0
     mass_g = vol_cm3 * density_g_cm3
     mass_lb = mass_g / 453.592
-    area_mm2 = 0
-    try:
-        faces = cq.Workplane().add(solid).faces().vals()
-        area_mm2 = sum(abs(f.Area()) for f in faces)
-    except Exception:
-        pass
     # Guard against degenerate bounding boxes
     xlen = max(bb.xlen, 1e-6)
     ylen = max(bb.ylen, 1e-6)
@@ -236,6 +311,8 @@ def get_envelope(solid, density_g_cm3=7.9):
         "mass_g": mass_g,
         "mass_lb": mass_lb,
         "mass_kg": mass_g / 1000.0,
+        "is_surface_model": solid is None,
+        "volume_estimated": solid is None,
     }
 
 
@@ -1284,6 +1361,135 @@ def _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thi
 # ==========================================================================
 # 5. MAIN DRIVER — unified entry point
 # ==========================================================================
+def run_surface_model(shape, envelope, planar, cyl, other, k_factor, material="steel"):
+    """Analysis path for surface-only STEP files (no solid body)."""
+    bb = envelope["bbox_mm"]
+    dims = sorted([bb["xlen"], bb["ylen"], bb["zlen"]])
+
+    # Try to detect thickness from parallel planar face pairs
+    thickness_mm = dims[0]  # default: thinnest bounding box dimension
+    if planar:
+        # Look for pairs of parallel planar faces at similar distance
+        normals_dists = []
+        for i, f, s in planar:
+            try:
+                plane = s.Plane()
+                loc = plane.Location()
+                d = plane.Axis().Direction()
+                normals_dists.append((i, (d.X(), d.Y(), d.Z()),
+                                      loc.X()*d.X() + loc.Y()*d.Y() + loc.Z()*d.Z()))
+            except Exception:
+                pass
+        # Find min distance between anti-parallel face pairs
+        best_thick = None
+        for a_idx in range(len(normals_dists)):
+            for b_idx in range(a_idx+1, len(normals_dists)):
+                _, na, da = normals_dists[a_idx]
+                _, nb, db = normals_dists[b_idx]
+                dot = na[0]*nb[0] + na[1]*nb[1] + na[2]*nb[2]
+                if abs(dot + 1.0) < 0.05:  # anti-parallel (opposing faces)
+                    gap = abs(da - db)
+                    if 0.1 < gap < 30.0:  # reasonable sheet metal thickness range
+                        if best_thick is None or gap < best_thick:
+                            best_thick = gap
+        if best_thick:
+            thickness_mm = best_thick
+
+    thickness_in = thickness_mm / 25.4
+
+    # Detect cylindrical features (holes, bends)
+    from collections import defaultdict as _dd
+    cyl_infos = []
+    for i, f, s in cyl:
+        try:
+            cyl_infos.append((i, cyl_face_info(f, s)))
+        except Exception:
+            pass
+
+    # Separate bends from holes based on v_len vs radius
+    bend_candidates = []
+    hole_candidates = []
+    for i, info in cyl_infos:
+        r_mm = info["radius"]
+        sweep = info["sweep_deg"]
+        v_len = info["v_len"]
+        if v_len > 5 * r_mm and sweep > 60:
+            bend_candidates.append(info)
+        elif sweep > 300:
+            # Full circle = hole
+            hole_candidates.append({
+                "type": "round",
+                "diameter_mm": r_mm * 2,
+                "diameter_in": r_mm * 2 / 25.4,
+            })
+
+    # Count unique holes by diameter
+    hole_diameters = defaultdict(int)
+    for h in hole_candidates:
+        key = round(h["diameter_mm"], 1)
+        hole_diameters[key] += 1
+
+    features = []
+    for d_mm, count in hole_diameters.items():
+        features.append({
+            "type": "round",
+            "diameter_mm": d_mm,
+            "diameter_in": d_mm / 25.4,
+            "count": count,
+        })
+
+    thickness_in = round(thickness_in, 4)
+
+    # Estimate flat dimensions
+    flat_width_mm = dims[1] + dims[2]  # rough unfolded estimate
+    flat_length_mm = max(dims[1], dims[2])
+    flat_width_in = round(flat_width_mm / 25.4, 3)
+    flat_length_in = round(flat_length_mm / 25.4, 3)
+
+    # Gauge detection
+    gauge_str = ""
+    gauge_map = {
+        0.030: "22 ga", 0.036: "20 ga", 0.048: "18 ga", 0.060: "16 ga",
+        0.075: "14 ga", 0.105: "12 ga", 0.120: "11 ga", 0.135: "10 ga",
+        0.188: "3/16\"", 0.250: "1/4\"", 0.375: "3/8\"", 0.500: "1/2\"",
+    }
+    best_gauge_diff = 999
+    for g_in, g_str in gauge_map.items():
+        diff = abs(thickness_in - g_in)
+        if diff < best_gauge_diff:
+            best_gauge_diff = diff
+            gauge_str = g_str
+
+    return {
+        "is_surface_model": True,
+        "surface_analysis_note": "This file contains surfaces/wireframes without solid geometry. "
+                                 "Dimensions and features were extracted from surface data. "
+                                 "Volume and weight are estimates.",
+        "thickness_mm": thickness_mm,
+        "thickness_in": thickness_in,
+        "gauge": gauge_str if best_gauge_diff < 0.015 else None,
+        "gauge_nominal_in": None,
+        "bend_radius_in": None,
+        "num_bends": len(bend_candidates),
+        "bend_angles_deg": [],
+        "bend_details": [],
+        "k_factor_assumed": None,
+        "k_factor_source": "surface model",
+        "flat_width_mm": flat_width_mm,
+        "flat_width_in": flat_width_in,
+        "flat_length_mm": flat_length_mm,
+        "flat_length_in": flat_length_in,
+        "num_features": len(features),
+        "features": features,
+        "feature_summary": {
+            "round_holes": sum(f["count"] for f in features if f["type"] == "round"),
+            "total": sum(f["count"] for f in features),
+        },
+        "flat_layout": [],
+        "processes": ["Laser/Punch", "Deburr"],
+    }
+
+
 def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json", material="steel"):
     try:
         shape, solid = load_step(step_path)
@@ -1293,7 +1499,7 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json",
     except Exception as e:
         raise ValueError(f"Failed to load STEP file: {e}")
 
-    envelope = get_envelope(solid, density)
+    envelope = get_envelope(solid, density, shape=shape)
 
     try:
         faces_list, planar, cyl, other = classify_faces(shape)
@@ -1301,6 +1507,34 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json",
         print(f"Warning: Face classification failed: {e}")
         faces_list, planar, cyl, other = [], [], [], []
 
+    # --- Surface-only model (no solid body) ---
+    if solid is None:
+        result = {
+            "source_file": step_path,
+            "fab_type": "sheet_metal",
+            "fab_type_confidence": "low",
+            "fab_sub_type": None,
+            "classification_reasons": ["surface_model_no_solid"],
+            "envelope": envelope,
+            "face_counts": {
+                "planar": len(planar),
+                "cylindrical": len(cyl),
+                "other": len(other),
+                "total": len(planar) + len(cyl) + len(other),
+            },
+        }
+        try:
+            result.update(run_surface_model(shape, envelope, planar, cyl, other, k_factor, material))
+        except Exception as e:
+            print(f"Warning: Surface analysis failed: {e}")
+            result["analysis_error"] = str(e)
+            result["is_surface_model"] = True
+
+        with open(out_json, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        return result
+
+    # --- Normal solid-body analysis ---
     # --- Auto-classify fab type ---
     fab_type, confidence, sub_type, reasons = classify_fab_type(
         shape, solid, envelope, planar, cyl, other)
