@@ -2243,7 +2243,7 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
 
 
 def _convert_cad_to_step(input_path, output_path):
-    """Convert SLDPRT/SLDASM/IGS/IGES to STEP using available converters."""
+    """Convert SLDPRT/SLDASM/IGS/IGES to STEP using multi-strategy approach."""
     ext = os.path.splitext(input_path)[1].lower()
 
     # IGES: use OCP directly (already installed with CadQuery)
@@ -2266,11 +2266,18 @@ def _convert_cad_to_step(input_path, output_path):
         except Exception as e:
             return False, f"IGES conversion error: {str(e)[:200]}"
 
-    # SLDPRT/SLDASM: try FreeCAD (must be installed separately)
+    # SLDPRT/SLDASM: multi-strategy conversion
     if ext in ('.sldprt', '.sldasm'):
-        try:
-            conv_script = f"""
-import sys, os
+        strategies_tried = []
+
+        # --- Strategy 1: FreeCAD (separate conda env) ---
+        fc_python = "/opt/conda/envs/fc/bin/python"
+        if os.path.exists(fc_python):
+            try:
+                conv_dir = os.path.dirname(output_path)
+                script_path = os.path.join(conv_dir, "_fc_convert.py")
+                with open(script_path, 'w') as sf:
+                    sf.write(f'''import sys, os
 try:
     import FreeCAD
     import Part
@@ -2284,31 +2291,184 @@ try:
     FreeCAD.closeDocument(doc.Name)
     print("OK")
 except Exception as e:
-    print(f"ERROR:{{e}}")
+    print("ERROR:" + str(e))
     sys.exit(1)
-"""
-            result = subprocess.run(
-                ["python3", "-c", conv_script],
-                capture_output=True, text=True, timeout=60
-            )
-            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return True, None
-            stderr = (result.stderr or result.stdout or "").strip()
-            if "No module named" in stderr or "ModuleNotFoundError" in stderr:
-                fmt = "SolidWorks" if ext == ".sldprt" else "SolidWorks Assembly"
-                return False, (
-                    f"This {fmt} file cannot be converted automatically on this server. "
-                    "Please export it as STEP format from SolidWorks: "
-                    "File -> Save As -> Save as type: STEP AP214 (*.step;*.stp)"
+''')
+                result = subprocess.run(
+                    [fc_python, script_path],
+                    capture_output=True, text=True, timeout=120,
+                    env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}
                 )
-            return False, f"Conversion failed: {stderr[-200:]}"
-        except subprocess.TimeoutExpired:
-            return False, "SolidWorks file conversion timed out."
+                try:
+                    os.remove(script_path)
+                except OSError:
+                    pass
+                if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+                    print(f"[SLDPRT] FreeCAD conversion succeeded for {os.path.basename(input_path)}")
+                    return True, None
+                strategies_tried.append("FreeCAD (not supported for this format)")
+            except subprocess.TimeoutExpired:
+                strategies_tried.append("FreeCAD (timed out)")
+            except Exception as e:
+                strategies_tried.append(f"FreeCAD ({str(e)[:60]})")
+        else:
+            strategies_tried.append("FreeCAD (not installed)")
+
+        # --- Strategy 2: OLE extraction (older SolidWorks files use OLE Structured Storage) ---
+        try:
+            import olefile
+            if olefile.isOleFile(input_path):
+                ole = olefile.OleFileIO(input_path)
+                streams = ole.listdir()
+                print(f"[SLDPRT] OLE streams found: {['/'.join(s) for s in streams]}")
+
+                # Look for embedded STEP or Parasolid data in OLE streams
+                for stream_path in streams:
+                    stream_name = '/'.join(stream_path).lower()
+                    try:
+                        data = ole.openstream(stream_path).read()
+                        # Check for embedded STEP data
+                        if b'ISO-10303-21' in data:
+                            step_start = data.find(b'ISO-10303-21')
+                            step_end = data.find(b'END-ISO-10303-21;', step_start)
+                            if step_end > step_start:
+                                step_data = data[step_start:step_end + len(b'END-ISO-10303-21;')]
+                                with open(output_path, 'wb') as f:
+                                    f.write(step_data)
+                                if os.path.getsize(output_path) > 100:
+                                    ole.close()
+                                    print(f"[SLDPRT] Extracted embedded STEP from OLE stream: {stream_name}")
+                                    return True, None
+
+                        # Check for embedded IGES data
+                        if b'S      1' in data[:200] or b'IGES' in data[:500]:
+                            iges_path = output_path.replace('.step', '.igs')
+                            with open(iges_path, 'wb') as f:
+                                f.write(data)
+                            # Convert IGES to STEP via OCP
+                            from OCP.IGESControl import IGESControl_Reader
+                            from OCP.IFSelect import IFSelect_RetDone
+                            from OCP.STEPControl import STEPControl_Writer, STEPControl_AsIs
+                            reader = IGESControl_Reader()
+                            if reader.ReadFile(iges_path) == IFSelect_RetDone:
+                                reader.TransferRoots()
+                                shape = reader.OneShape()
+                                writer = STEPControl_Writer()
+                                writer.Transfer(shape, STEPControl_AsIs)
+                                if writer.Write(output_path) == 1 and os.path.exists(output_path):
+                                    ole.close()
+                                    try:
+                                        os.remove(iges_path)
+                                    except OSError:
+                                        pass
+                                    print(f"[SLDPRT] Extracted and converted embedded IGES from OLE")
+                                    return True, None
+                    except Exception:
+                        continue
+                ole.close()
+                strategies_tried.append("OLE extraction (no embedded STEP/IGES found)")
+            else:
+                strategies_tried.append("OLE extraction (not an OLE file)")
+        except ImportError:
+            strategies_tried.append("OLE extraction (olefile not installed)")
         except Exception as e:
-            return False, (
-                "SLDPRT/SLDASM files require conversion to STEP format. "
-                "Please export from SolidWorks: File -> Save As -> Save as type: STEP AP214 (*.step;*.stp)"
-            )
+            strategies_tried.append(f"OLE extraction ({str(e)[:60]})")
+
+        # --- Strategy 3: Binary signature scan for embedded STEP/IGES data ---
+        try:
+            with open(input_path, 'rb') as f:
+                raw = f.read()
+
+            # Scan for embedded STEP data (ISO-10303-21 header)
+            step_sig = b'ISO-10303-21'
+            pos = raw.find(step_sig)
+            if pos >= 0:
+                end_sig = b'END-ISO-10303-21;'
+                end_pos = raw.find(end_sig, pos)
+                if end_pos > pos:
+                    step_data = raw[pos:end_pos + len(end_sig)]
+                    with open(output_path, 'wb') as f:
+                        f.write(step_data)
+                    if os.path.getsize(output_path) > 200:
+                        # Validate by trying to read with OCP
+                        try:
+                            from OCP.STEPControl import STEPControl_Reader
+                            from OCP.IFSelect import IFSelect_RetDone
+                            test_reader = STEPControl_Reader()
+                            if test_reader.ReadFile(output_path) == IFSelect_RetDone:
+                                print(f"[SLDPRT] Extracted embedded STEP data ({len(step_data)} bytes) at offset {pos}")
+                                return True, None
+                            else:
+                                os.remove(output_path)
+                                strategies_tried.append("Binary scan (found STEP signature but data invalid)")
+                        except Exception:
+                            os.remove(output_path)
+                            strategies_tried.append("Binary scan (found STEP signature but read failed)")
+                    else:
+                        strategies_tried.append("Binary scan (STEP data too small)")
+                else:
+                    strategies_tried.append("Binary scan (found STEP header but no end marker)")
+            else:
+                # Scan for IGES signature
+                iges_sig = b'S      1'
+                iges_pos = raw.find(iges_sig)
+                if iges_pos >= 0 and iges_pos < len(raw) - 1000:
+                    # Try extracting IGES data from this position
+                    # IGES files have a specific structure with S/G/D/P/T sections
+                    iges_data = raw[iges_pos:]
+                    # Find the end by looking for the T section terminator
+                    t_end = iges_data.find(b'T      ')
+                    if t_end > 0:
+                        # Include the T line (typically 80 chars)
+                        line_end = iges_data.find(b'\n', t_end)
+                        if line_end < 0:
+                            line_end = min(t_end + 80, len(iges_data))
+                        iges_extract = iges_data[:line_end]
+                        iges_path = output_path.replace('.step', '_extracted.igs')
+                        with open(iges_path, 'wb') as f:
+                            f.write(iges_extract)
+                        try:
+                            from OCP.IGESControl import IGESControl_Reader
+                            from OCP.IFSelect import IFSelect_RetDone
+                            from OCP.STEPControl import STEPControl_Writer, STEPControl_AsIs
+                            reader = IGESControl_Reader()
+                            if reader.ReadFile(iges_path) == IFSelect_RetDone:
+                                reader.TransferRoots()
+                                shape = reader.OneShape()
+                                writer = STEPControl_Writer()
+                                writer.Transfer(shape, STEPControl_AsIs)
+                                if writer.Write(output_path) == 1:
+                                    try:
+                                        os.remove(iges_path)
+                                    except OSError:
+                                        pass
+                                    print(f"[SLDPRT] Extracted and converted embedded IGES data")
+                                    return True, None
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(iges_path)
+                        except OSError:
+                            pass
+                        strategies_tried.append("Binary scan (found IGES data but conversion failed)")
+                    else:
+                        strategies_tried.append("Binary scan (IGES header found but incomplete data)")
+                else:
+                    strategies_tried.append("Binary scan (no STEP or IGES signatures found)")
+        except Exception as e:
+            strategies_tried.append(f"Binary scan ({str(e)[:60]})")
+
+        # --- All strategies exhausted ---
+        fmt = "SolidWorks Part" if ext == ".sldprt" else "SolidWorks Assembly"
+        tried_summary = "; ".join(strategies_tried)
+        print(f"[SLDPRT] All strategies failed for {os.path.basename(input_path)}: {tried_summary}")
+        return False, (
+            f"This {fmt} file (.{ext[1:]}) uses a proprietary SolidWorks format that cannot be "
+            "converted automatically. Strategies attempted: " + tried_summary + ". "
+            "To analyze this part, please export from SolidWorks as STEP: "
+            "File > Save As > Save as type: STEP AP214 (*.step;*.stp). "
+            "IGES (.igs) export also works."
+        )
 
     return False, f"Unsupported CAD format: {ext}"
 

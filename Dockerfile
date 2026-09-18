@@ -12,14 +12,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpangocairo-1.0-0 \
         libgdk-pixbuf-xlib-2.0-0 \
     libosmesa6 \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+    libosmesa6-dev \
+    libglu1-mesa \
+    mesa-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
+
+# Make sure libOSMesa is findable everywhere
+ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/opt/conda/lib:${LD_LIBRARY_PATH}"
+ENV LIBGL_ALWAYS_SOFTWARE=1
 
 # Create conda environment with CadQuery (has all native deps bundled)
-RUN conda install -c conda-forge -c cadquery python=3.11 cadquery=2.4.0 mesalib -y && conda clean -afy
+RUN conda install -c conda-forge -c cadquery python=3.11 cadquery=2.4.0 -y && conda clean -afy
 
-# Ensure OSMesa is findable
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/opt/conda/lib:${LD_LIBRARY_PATH}
+# Symlink libOSMesa into conda's lib so OpenCascade always finds it
+RUN ln -sf /usr/lib/x86_64-linux-gnu/libOSMesa.so.8 /opt/conda/lib/libOSMesa.so.8 || true \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libOSMesa.so /opt/conda/lib/libOSMesa.so || true \
+    && ldconfig
+
+# Install FreeCAD in a separate conda environment (avoids OCCT version conflicts with CadQuery)
+# Adds SLDPRT/SLDASM/SAT/BREP import via FreeCAD headless
+RUN conda create -n fc -c conda-forge python=3.11 freecad -y && conda clean -afy || \
+    echo "WARN: FreeCAD install failed, SLDPRT conversion limited"
 
 # Python dependencies
 RUN pip install --no-cache-dir \
@@ -29,8 +43,8 @@ RUN pip install --no-cache-dir \
     reportlab \
     matplotlib \
     Pillow \
-    PyMuPDF \
-    openpyxl
+    openpyxl \
+    olefile
 
 WORKDIR /app
 
@@ -39,9 +53,8 @@ COPY step_quote_extract.py .
 COPY generate_views.py .
 COPY render_flat_pattern.py .
 COPY generate_report.py .
-COPY drawing_extractor.py .
-COPY cost_engine.py .
 COPY app.py .
+COPY cost_engine.py .
 COPY INSTRUCTIONS.md .
 
 # Create upload directory
