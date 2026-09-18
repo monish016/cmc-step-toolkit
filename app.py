@@ -970,9 +970,11 @@ function renderResults(results) {
     html += '</div>';
 
     // Download buttons
-    html += '<div class="dl-row">' +
-      '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download PDF Report</a>' +
-      '<button class="dl-btn" style="background:#1a5a1a" onclick="downloadQuotePDF(' + idx + ')">Download Customer Quote</button>' +
+    html += '<div class="dl-row">';
+    if (r.files.report_pdf) {
+      html += '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download PDF Report</a>';
+    }
+    html += '<button class="dl-btn" style="background:#1a5a1a" onclick="downloadQuotePDF(' + idx + ')">Download Customer Quote</button>' +
       '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download JSON</a>' +
       '<button class="dl-btn secondary" onclick="exportCSV(' + idx + ')">Export CSV</button>' +
       '<button class="dl-btn secondary" onclick="printQuote(' + idx + ')">Print Quote</button>' +
@@ -2595,13 +2597,15 @@ def analyze():
                 except Exception as rpt_err:
                     print(f"Warning: Failed to generate report for page {pg_num}: {rpt_err}")
 
-        # Build file URLs
+        # Build file URLs — only include files that actually exist
         base = f"/files/{job_id}"
         files = {
             "geometry_json": f"{base}/geometry_extract.json",
-            "flat_pattern": f"{base}/flat_pattern.png",
-            "report_pdf": f"{base}/{part_stem}_report.pdf",
         }
+        if os.path.isfile(flat_path):
+            files["flat_pattern"] = f"{base}/flat_pattern.png"
+        if os.path.isfile(report_path):
+            files["report_pdf"] = f"{base}/{part_stem}_report.pdf"
         # Add per-page report URLs
         for pg_num, rpt_name in page_reports.items():
             files[f"page_{pg_num}_report"] = f"{base}/{rpt_name}"
@@ -2716,17 +2720,20 @@ def analyze():
     except Exception as ce:
         print(f"Warning: Cost estimation failed (non-fatal): {ce}")
 
-    # build file URLs
+    # build file URLs — only include files that actually exist
     base = f"/files/{job_id}"
     files = {
-        "report_pdf": f"{base}/{part_stem}_report.pdf",
         "geometry_json": f"{base}/geometry_extract.json",
-        "flat_pattern": f"{base}/flat_pattern.png",
-        "view_iso": f"{base}/views/view_iso.png",
-        "view_top": f"{base}/views/view_top.png",
-        "view_front": f"{base}/views/view_front.png",
-        "view_right": f"{base}/views/view_right.png",
     }
+    if os.path.isfile(report_path):
+        files["report_pdf"] = f"{base}/{part_stem}_report.pdf"
+    if os.path.isfile(flat_path):
+        files["flat_pattern"] = f"{base}/flat_pattern.png"
+    if os.path.isdir(views_dir):
+        for vname in ["view_iso", "view_top", "view_front", "view_right"]:
+            vfile = os.path.join(views_dir, f"{vname}.png")
+            if os.path.isfile(vfile):
+                files[vname] = f"{base}/views/{vname}.png"
 
     # Add to job history
     env = geometry.get("envelope", {})
@@ -2743,8 +2750,8 @@ def analyze():
         "dimensions": dims,
         "num_bends": geometry.get("num_bends", 0),
         "weight": f'{env.get("mass_lb", 0):.2f} lb',
-        "report_url": files["report_pdf"],
-        "json_url": files["geometry_json"],
+        "report_url": files.get("report_pdf", ""),
+        "json_url": files.get("geometry_json", ""),
     }
     try:
         _insert_job(history_entry)
