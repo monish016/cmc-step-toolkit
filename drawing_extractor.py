@@ -18,7 +18,7 @@ try:
 except ImportError:
     fitz = None
 
-# ââ Material database ââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Material database ──────────────────────────────────────────────────
 KNOWN_MATERIALS = {
     # Stainless steels
     "304": {"name": "Stainless Steel 304", "density_gcc": 7.9, "family": "stainless"},
@@ -69,15 +69,15 @@ FINISH_KEYWORDS = [
 ]
 
 
-# ââ Regex patterns âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Regex patterns ─────────────────────────────────────────────────────
 
 def _compile_patterns():
     """Pre-compile all extraction patterns."""
     return {
         # Dimensions: 12.500, .125, 3/4, 1-1/2, with optional " or IN or MM
         "dimensions": re.compile(
-            r'(\d+\.?\d*)\s*[xXÃ]\s*(\d+\.?\d*)'  # LxW
-            r'(?:\s*[xXÃ]\s*(\d+\.?\d*))?'          # optional xH
+            r'(\d+\.?\d*)\s*[xX×]\s*(\d+\.?\d*)'  # LxW
+            r'(?:\s*[xX×]\s*(\d+\.?\d*))?'          # optional xH
             r'\s*(?:"|IN(?:CH(?:ES)?)?|MM|CM)?',
             re.IGNORECASE
         ),
@@ -130,13 +130,13 @@ def _compile_patterns():
         ),
         # Tolerances
         "tolerance": re.compile(
-            r'[Â±]\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
+            r'[±]\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
             r'|\+/?-\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
-            r'|(?:TOL(?:ERANCE)?)\s*[:=]?\s*[Â±]?\s*(\d*\.?\d+)',
+            r'|(?:TOL(?:ERANCE)?)\s*[:=]?\s*[±]?\s*(\d*\.?\d+)',
             re.IGNORECASE
         ),
         "tolerance_class": re.compile(
-            r'\.X+\s*[Â±]\s*\.?\d+'
+            r'\.X+\s*[±]\s*\.?\d+'
             r'|UNLESS\s+OTHERWISE\s+(?:NOTED|SPECIFIED|STATED)',
             re.IGNORECASE
         ),
@@ -147,8 +147,8 @@ def _compile_patterns():
             re.IGNORECASE
         ),
         "bend_angle": re.compile(
-            r'(\d{1,3})\s*(?:Â°|DEG(?:REES?)?)\s*(?:BEND)?'
-            r'|BEND\s+(?:ANGLE\s*)?[:=]?\s*(\d{1,3})\s*(?:Â°|DEG)?',
+            r'(\d{1,3})\s*(?:°|DEG(?:REES?)?)\s*(?:BEND)?'
+            r'|BEND\s+(?:ANGLE\s*)?[:=]?\s*(\d{1,3})\s*(?:°|DEG)?',
             re.IGNORECASE
         ),
         # Part number
@@ -180,7 +180,7 @@ def _compile_patterns():
 PATTERNS = _compile_patterns()
 
 
-# ââ Extraction functions âââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Extraction functions ───────────────────────────────────────────────
 
 def extract_text_from_pdf(pdf_path):
     """Extract text from all pages of a PDF."""
@@ -491,13 +491,13 @@ def find_features(text):
     """Extract hole/feature callouts like '4X .28 THRU', 'dia 1.27 THRU', etc."""
     features = []
 
-    # Diameter symbol variants: â (U+2205), Ã (U+00D8), â (U+2300)
-    DIA = r'[âÃâ]'
+    # Diameter symbol variants: ∅ (U+2205), Ø (U+00D8), ⌀ (U+2300)
+    DIA = r'[∅Ø⌀]'
 
-    # ââ Round holes: [NX] [â] .DDD [THRU | DP depth] ââ
+    # ── Round holes: [NX] [∅] .DDD [THRU | DP depth] ──
     hole_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'               # optional count  "4X "
-        r'(?:' + DIA + r'\s*)?'                # optional â
+        r'(?:' + DIA + r'\s*)?'                # optional ∅
         r'(\d*\.\d+|\d+\.\d*)'                # diameter
         r'\s*(?:"|IN)?\s*'                     # optional units
         r'(THRU(?:\s*ALL)?'                    # through
@@ -548,7 +548,7 @@ def find_features(text):
 
         features.append(feat)
 
-    # ââ Tapped holes: [NX] thread-pitch [UNC|UNF] [THRU|DP] ââ
+    # ── Tapped holes: [NX] thread-pitch [UNC|UNF] [THRU|DP] ──
     # Strict patterns to avoid matching part numbers, dates, material grades
     tap_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'
@@ -600,7 +600,7 @@ def find_features(text):
         }
         features.append(feat)
 
-    # ââ Slots: W x L [THRU] or SLOT W x L ââ
+    # ── Slots: W x L [THRU] or SLOT W x L ──
     slot_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'
         r'(?:SLOT\s+)?'
@@ -739,7 +739,7 @@ def _analyze_single_page(page_text, page_num):
 
 
 def analyze_drawing(pdf_path):
-    """Main analysis pipeline for a PDF drawing â per-page extraction."""
+    """Main analysis pipeline for a PDF drawing — per-page extraction."""
     if not os.path.isfile(pdf_path):
         return {"error": f"File not found: {pdf_path}"}
 
@@ -833,7 +833,7 @@ def analyze_drawing(pdf_path):
     return result
 
 
-# ââ CLI interface ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── CLI interface ──────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Extract specs from engineering PDF drawings")
