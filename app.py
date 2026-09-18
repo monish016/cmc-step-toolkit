@@ -17,6 +17,7 @@ import sqlite3
 import io
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_file, jsonify, url_for
+import requests as http_requests
 from werkzeug.utils import secure_filename
 try:
     import openpyxl
@@ -2422,6 +2423,50 @@ def _convert_cad_to_step(input_path, output_path):
                     strategies_tried.append("Binary scan (no STEP or IGES signatures found)")
         except Exception as e:
             strategies_tried.append(f"Binary scan ({str(e)[:60]})")
+
+        # --- Strategy 3: Convert3D cloud API (free tier: 10 conversions/month) ---
+        convert3d_token = os.environ.get("CONVERT3D_API_TOKEN", "").strip()
+        if convert3d_token:
+            try:
+                print(f"[SLDPRT] Trying Convert3D API for {os.path.basename(input_path)}...")
+                with open(input_path, "rb") as f:
+                    resp = http_requests.post(
+                        "https://api.convert3d.org/convert",
+                        headers={"Authorization": f"Bearer {convert3d_token}"},
+                        files={"file": (os.path.basename(input_path), f)},
+                        data={"from": ext[1:], "to": "stp"},
+                        timeout=300,
+                    )
+                if resp.status_code == 200 and len(resp.content) > 100:
+                    with open(output_path, "wb") as out:
+                        out.write(resp.content)
+                    # Validate the converted STEP file is readable
+                    try:
+                        from OCP.STEPControl import STEPControl_Reader
+                        from OCP.IFSelect import IFSelect_RetDone
+                        test_reader = STEPControl_Reader()
+                        if test_reader.ReadFile(output_path) == IFSelect_RetDone:
+                            print(f"[SLDPRT] Convert3D API succeeded ({len(resp.content)} bytes)")
+                            return True, None
+                        else:
+                            os.remove(output_path)
+                            strategies_tried.append("Convert3D API (returned data but STEP validation failed)")
+                    except Exception as ve:
+                        os.remove(output_path)
+                        strategies_tried.append(f"Convert3D API (STEP validation error: {str(ve)[:60]})")
+                else:
+                    err_detail = ""
+                    try:
+                        err_detail = resp.json().get("error", resp.text[:100])
+                    except Exception:
+                        err_detail = f"HTTP {resp.status_code}"
+                    strategies_tried.append(f"Convert3D API ({err_detail})")
+                    print(f"[SLDPRT] Convert3D API failed: {err_detail}")
+            except Exception as e:
+                strategies_tried.append(f"Convert3D API ({str(e)[:60]})")
+                print(f"[SLDPRT] Convert3D API error: {e}")
+        else:
+            strategies_tried.append("Convert3D API (no API token configured)")
 
         # --- All strategies exhausted ---
         fmt = "SolidWorks Part" if ext == ".sldprt" else "SolidWorks Assembly"
