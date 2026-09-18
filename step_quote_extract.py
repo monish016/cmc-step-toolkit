@@ -662,34 +662,68 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
         sample_n = face_group[0]["normal"]
         proj_axis = max(range(3), key=lambda i: abs(sample_n[i]))
 
-        # Group by depth along the projection axis
+        # Group by depth along the projection axis (coarser rounding for grouping)
         depth_groups = defaultdict(list)
         for fg in face_group:
-            depth = round(fg["center"][proj_axis], 1)
+            depth = round(fg["center"][proj_axis], 0)  # 1mm tolerance for same depth
             depth_groups[depth].append(fg)
 
         # The outermost depth (highest absolute value along axis) = top face
         # Inner depths = pocket floors
         if len(depth_groups) > 1:
             depths = sorted(depth_groups.keys())
-            # Consider non-largest faces at inner depths as pockets
             outer_depth = depths[-1] if sample_n[proj_axis] > 0 else depths[0]
             for d in depths:
                 if d == outer_depth:
                     continue
-                for fg in depth_groups[d]:
+                faces_at_depth = depth_groups[d]
+                # Cluster faces at this depth by proximity to form distinct pockets
+                # Each cluster = one physical pocket
+                clusters = []
+                assigned = [False] * len(faces_at_depth)
+                for i_f, fg in enumerate(faces_at_depth):
+                    if assigned[i_f]:
+                        continue
+                    if fg["area"] < 10:  # Skip tiny faces
+                        assigned[i_f] = True
+                        continue
+                    # Start a new cluster with this face
+                    cluster_faces = [fg]
+                    assigned[i_f] = True
+                    # Find all nearby faces at this depth
+                    changed = True
+                    while changed:
+                        changed = False
+                        for j_f, fg2 in enumerate(faces_at_depth):
+                            if assigned[j_f] or fg2["area"] < 10:
+                                continue
+                            # Check if close to any face already in cluster
+                            for cf in cluster_faces:
+                                if math.dist(cf["center"], fg2["center"]) < 50.0:  # 50mm cluster radius
+                                    cluster_faces.append(fg2)
+                                    assigned[j_f] = True
+                                    changed = True
+                                    break
+                    # Merge cluster into one pocket
+                    total_area = sum(cf["area"] for cf in cluster_faces)
+                    avg_center = tuple(
+                        sum(cf["center"][ax] * cf["area"] for cf in cluster_faces) / total_area
+                        for ax in range(3)
+                    )
                     pocket_depth = abs(outer_depth - d)
-                    if pocket_depth > 0.5 and fg["area"] > 10:  # Meaningful pocket
-                        pocket_candidates.append({
+                    if pocket_depth > 0.5 and total_area > 10:
+                        clusters.append({
                             "type": "pocket",
                             "depth_mm": round(pocket_depth, 2),
                             "depth_in": round(pocket_depth / 25.4, 3),
-                            "area_mm2": round(fg["area"], 1),
-                            "center": fg["center"],
-                            "confidence": "medium"
+                            "area_mm2": round(total_area, 1),
+                            "center": avg_center,
+                            "confidence": "medium",
+                            "face_count": len(cluster_faces),
                         })
+                pocket_candidates.extend(clusters)
 
-    # Deduplicate pockets by proximity
+    # Deduplicate pockets by proximity (for pockets from different normal groups)
     used = set()
     for i, p in enumerate(pocket_candidates):
         if i in used:
@@ -697,7 +731,7 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
         for j in range(i + 1, len(pocket_candidates)):
             if j in used:
                 continue
-            if math.dist(p["center"], pocket_candidates[j]["center"]) < 5.0:
+            if math.dist(p["center"], pocket_candidates[j]["center"]) < 10.0:
                 # Merge: keep larger
                 if pocket_candidates[j]["area_mm2"] > p["area_mm2"]:
                     p.update(pocket_candidates[j])
