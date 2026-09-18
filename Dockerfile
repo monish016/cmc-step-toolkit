@@ -48,6 +48,7 @@ WORKDIR /app
 COPY step_quote_extract.py .
 COPY generate_views.py .
 COPY render_flat_pattern.py .
+COPY drawing_extractor.py .
 COPY generate_report.py .
 COPY app.py .
 COPY cost_engine.py .
