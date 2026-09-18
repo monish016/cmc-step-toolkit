@@ -2270,51 +2270,7 @@ def _convert_cad_to_step(input_path, output_path):
     if ext in ('.sldprt', '.sldasm'):
         strategies_tried = []
 
-        # --- Strategy 1: FreeCAD (separate conda env) ---
-        fc_python = "/opt/conda/envs/fc/bin/python"
-        if os.path.exists(fc_python):
-            try:
-                conv_dir = os.path.dirname(output_path)
-                script_path = os.path.join(conv_dir, "_fc_convert.py")
-                with open(script_path, 'w') as sf:
-                    sf.write(f'''import sys, os
-try:
-    import FreeCAD
-    import Part
-    import Import
-    doc = FreeCAD.newDocument("conv")
-    Import.insert("{input_path}", doc.Name)
-    if not doc.Objects:
-        print("ERROR:No objects imported")
-        sys.exit(1)
-    Part.export(doc.Objects, "{output_path}")
-    FreeCAD.closeDocument(doc.Name)
-    print("OK")
-except Exception as e:
-    print("ERROR:" + str(e))
-    sys.exit(1)
-''')
-                result = subprocess.run(
-                    [fc_python, script_path],
-                    capture_output=True, text=True, timeout=120,
-                    env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}
-                )
-                try:
-                    os.remove(script_path)
-                except OSError:
-                    pass
-                if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100:
-                    print(f"[SLDPRT] FreeCAD conversion succeeded for {os.path.basename(input_path)}")
-                    return True, None
-                strategies_tried.append("FreeCAD (not supported for this format)")
-            except subprocess.TimeoutExpired:
-                strategies_tried.append("FreeCAD (timed out)")
-            except Exception as e:
-                strategies_tried.append(f"FreeCAD ({str(e)[:60]})")
-        else:
-            strategies_tried.append("FreeCAD (not installed)")
-
-        # --- Strategy 2: OLE extraction (older SolidWorks files use OLE Structured Storage) ---
+        # --- Strategy 1: OLE extraction (older SolidWorks files use OLE Structured Storage) ---
         try:
             import olefile
             if olefile.isOleFile(input_path):
@@ -2374,7 +2330,7 @@ except Exception as e:
         except Exception as e:
             strategies_tried.append(f"OLE extraction ({str(e)[:60]})")
 
-        # --- Strategy 3: Binary signature scan for embedded STEP/IGES data ---
+        # --- Strategy 2: Binary signature scan for embedded STEP/IGES data ---
         try:
             with open(input_path, 'rb') as f:
                 raw = f.read()

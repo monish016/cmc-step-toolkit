@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libosmesa6 \
     libosmesa6-dev \
     libglu1-mesa \
+    libgomp1 \
     mesa-utils \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
@@ -29,11 +30,6 @@ RUN conda install -c conda-forge -c cadquery python=3.11 cadquery=2.4.0 -y && co
 RUN ln -sf /usr/lib/x86_64-linux-gnu/libOSMesa.so.8 /opt/conda/lib/libOSMesa.so.8 || true \
     && ln -sf /usr/lib/x86_64-linux-gnu/libOSMesa.so /opt/conda/lib/libOSMesa.so || true \
     && ldconfig
-
-# Install FreeCAD in a separate conda environment (avoids OCCT version conflicts with CadQuery)
-# Adds SLDPRT/SLDASM/SAT/BREP import via FreeCAD headless
-RUN conda create -n fc -c conda-forge python=3.11 freecad -y && conda clean -afy || \
-    echo "WARN: FreeCAD install failed, SLDPRT conversion limited"
 
 # Python dependencies
 RUN pip install --no-cache-dir \
