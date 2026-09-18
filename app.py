@@ -715,7 +715,7 @@ materialSel.addEventListener("change", () => {
 dropZone.addEventListener("drop", ev => {
   const files = Array.from(ev.dataTransfer.files).filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['step','stp','pdf','dwg','dxf'].includes(ext);
+    return ['step','stp','pdf','dwg','dxf','sldprt','sldasm','igs','iges'].includes(ext);
   });
   addFiles(files);
 });
