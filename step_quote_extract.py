@@ -641,7 +641,8 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
     for i, f, surf in planar:
         pln = surf.Plane()
         n = pln.Axis().Direction()
-        n_key = (round(abs(n.X()), 1), round(abs(n.Y()), 1), round(abs(n.Z()), 1))
+        # Preserve sign so +Z (top) and -Z (bottom) faces stay in separate groups
+        n_key = (round(n.X(), 1), round(n.Y(), 1), round(n.Z(), 1))
         loc = pln.Location()
         area = f.Area()
         ctr = f.Center()
@@ -718,12 +719,14 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
                             "depth_in": round(pocket_depth / 25.4, 3),
                             "area_mm2": round(total_area, 1),
                             "center": avg_center,
+                            "proj_axis": proj_axis,
                             "confidence": "medium",
                             "face_count": len(cluster_faces),
                         })
                 pocket_candidates.extend(clusters)
 
-    # Deduplicate pockets by proximity (for pockets from different normal groups)
+    # Deduplicate pockets by 2D proximity (ignoring depth axis)
+    # This merges duplicate detections from opposite normals (e.g. top vs bottom of plate)
     used = set()
     for i, p in enumerate(pocket_candidates):
         if i in used:
@@ -731,11 +734,21 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
         for j in range(i + 1, len(pocket_candidates)):
             if j in used:
                 continue
-            if math.dist(p["center"], pocket_candidates[j]["center"]) < 10.0:
+            pj = pocket_candidates[j]
+            # Compare using 2D distance on axes perpendicular to depth
+            ax = p["proj_axis"]
+            other_axes = [a for a in range(3) if a != ax]
+            dist_2d = math.sqrt(
+                (p["center"][other_axes[0]] - pj["center"][other_axes[0]])**2 +
+                (p["center"][other_axes[1]] - pj["center"][other_axes[1]])**2
+            )
+            if dist_2d < 15.0:
                 # Merge: keep larger
-                if pocket_candidates[j]["area_mm2"] > p["area_mm2"]:
-                    p.update(pocket_candidates[j])
+                if pj["area_mm2"] > p["area_mm2"]:
+                    p.update(pj)
                 used.add(j)
+        # Remove internal tracking field before appending
+        p.pop("proj_axis", None)
         features.append(p)
 
     # --- Slots: partial cylindrical faces (arcs < 360) that aren't bend faces ---
