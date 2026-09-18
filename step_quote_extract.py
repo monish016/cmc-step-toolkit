@@ -654,6 +654,11 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
             "center": (ctr.x, ctr.y, ctr.z),
         })
 
+    # Compute part thickness = smallest bounding box dimension
+    # Pocket depth cannot exceed this — anything deeper is a profile/edge, not a pocket
+    bbox_dims = sorted([bb["xlen"], bb["ylen"], bb["zlen"]])
+    part_thickness = bbox_dims[0]  # smallest dimension
+
     # For each normal direction, find faces at different depths = potential pockets/steps
     pocket_candidates = []
     for n_key, face_group in normal_groups.items():
@@ -712,6 +717,9 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
                         for ax in range(3)
                     )
                     pocket_depth = abs(outer_depth - d)
+                    # Skip if depth exceeds part thickness (it's a profile edge, not a pocket)
+                    if pocket_depth > part_thickness * 1.2:
+                        continue
                     if pocket_depth > 0.5 and total_area > 10:
                         clusters.append({
                             "type": "pocket",
