@@ -1504,7 +1504,7 @@ function exportDrawingCSV(idx) {
   }
   var csv = rows.map(function(row) {
     return row.map(function(c) { return '"' + String(c).replace(/"/g,'""') + '"'; }).join(',');
-  }).join('\n');
+  }).join('\\n');
   var blob = new Blob([csv], {type:'text/csv'});
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
