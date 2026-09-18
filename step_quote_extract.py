@@ -197,7 +197,7 @@ def _try_sew_to_solid(shape):
     try:
         sewer = BRepBuilderAPI_Sewing(1e-3)
         # Feed all faces from the shape into the sewer
-        explorer = TopExp_Explorer(shape.wrapped, TopAbs_FACE)
+        explorer = TopExp_Explorer(shape.val().wrapped, TopAbs_FACE)
         face_count = 0
         while explorer.More():
             sewer.Add(explorer.Current())
@@ -276,7 +276,9 @@ def get_envelope(solid, density_g_cm3=7.9, shape=None):
         # Surface-only: get bounding box and area from shape faces
         if shape is None:
             raise ValueError("No solid and no shape available for analysis.")
-        bb = shape.BoundingBox()
+        # shape is a Workplane; get bounding box from the underlying compound
+        _compound = shape.val()
+        bb = _compound.BoundingBox()
         vol_mm3 = 0.0
         area_mm2 = 0
         try:
