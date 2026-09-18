@@ -1237,6 +1237,7 @@ function renderDrawingResult(r, idx) {
     '<h3>' + r.filename + '</h3><div><span class="badge" style="background:#0066aa">Drawing</span> ' +
     '<span class="badge" style="background:' + confColor + '">' + fabLabel + '</span>' +
     (drawingPageCount > 1 ? ' <span class="badge" style="background:#555">' + drawingPageCount + ' parts</span>' : '') +
+    ' <span class="badge">OK</span>' +
     '</div></div>' +
     '<div class="result-body" id="result-' + idx + '">';
 
@@ -1279,14 +1280,7 @@ function renderDrawingResult(r, idx) {
   if (cf.flat_length_in) html += '<div class="geo-stat"><div class="value">' + cf.flat_length_in + '"</div><div class="label" title="Length along the bend axis">Flat/Dev Length</div></div>';
   html += '</div>';
 
-  // Flat pattern image + views
-  html += '<div class="view-grid">';
-  if (r.files && r.files.flat_pattern) {
-    html += '<div class="view-item"><img src="' + r.files.flat_pattern + '" alt="Flat Pattern" onerror="hideParent(this)"><div class="view-label">Flat Pattern</div></div>';
-  }
-  html += '</div>';
-
-  // Detail table (bend info, tolerances, finishes)
+  // Detail table (bend info, tolerances, finishes) - matching STEP layout
   html += '<table class="detail-table">';
   if (cf.num_bends > 0 && cf.bend_angles && cf.bend_angles.length) {
     html += '<tr><th>Bend angles</th><td>' + cf.bend_angles.map(function(a){return a.toFixed(0) + ' deg';}).join(', ') + '</td></tr>';
@@ -1305,19 +1299,19 @@ function renderDrawingResult(r, idx) {
   html += '<tr><th>Drawing pages</th><td>' + drawingPageCount + ' of ' + d.page_count + ' total</td></tr>';
   html += '</table>';
 
-  // Download buttons (STEP-style)
-  html += '<div class="dl-row">';
-  if (r.files && r.files.report_pdf) {
-    html += '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download PDF Report</a>';
-  }
-  if (r.files && r.files.geometry_json) {
-    html += '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download JSON</a>';
+  // Flat pattern image + views (matching STEP view grid)
+  html += '<div class="view-grid">';
+  if (r.files && r.files.flat_pattern) {
+    html += '<div class="view-item"><img src="' + r.files.flat_pattern + '" alt="Flat Pattern" onerror="hideParent(this)"><div class="view-label">Flat Pattern</div></div>';
   }
   html += '</div>';
 
   // Overall features table
   if (d.features && d.features.length) {
-    html += '<h4 style="margin:1rem 0 0.5rem;color:#2a5a2a;font-size:0.95rem">Extracted Features (from drawing callouts)</h4>';
+    var fCounts = {};
+    d.features.forEach(function(f) { fCounts[f.type] = (fCounts[f.type] || 0) + (f.count || 1); });
+    var fSummary = Object.keys(fCounts).map(function(k) { return fCounts[k] + ' ' + k.replace(/_/g,' '); }).join(', ');
+    html += '<h4 style="margin:1rem 0 0.5rem;color:#2a5a2a;font-size:0.95rem">Extracted Features <span style="font-weight:400;color:#666;font-size:0.85rem">(' + fSummary + ')</span></h4>';
     html += '<table class="detail-table"><tr><th>Type</th><th>Count</th><th>Size</th><th>Callout</th></tr>';
     d.features.forEach(function(f) {
       var size = '';
@@ -1336,9 +1330,20 @@ function renderDrawingResult(r, idx) {
     html += '</table>';
   }
 
-  // Per-page results
+  // Download buttons - STEP-style row with combined PDF prominent
+  html += '<div class="dl-row">';
+  if (r.files && r.files.report_pdf) {
+    html += '<a class="dl-btn" href="' + r.files.report_pdf + '" download>Download Combined PDF Report</a>';
+  }
+  if (r.files && r.files.geometry_json) {
+    html += '<a class="dl-btn secondary" href="' + r.files.geometry_json + '" download>Download JSON</a>';
+  }
+  html += '<button class="dl-btn secondary" onclick="exportDrawingCSV(' + idx + ')">Export CSV</button>';
+  html += '</div>';
+
+  // Per-page results (auto-expanded, matching STEP detail style)
   if (hasPages) {
-    html += '<h4 style="margin:1rem 0 0.5rem;color:#2a5a2a;font-size:0.95rem">Per-Page Extraction (' + d.pages.length + ' drawings)</h4>';
+    html += '<h4 style="margin:1rem 0 0.5rem;color:#2a5a2a;font-size:0.95rem">Per-Page Detail (' + d.pages.length + ' drawing' + (d.pages.length > 1 ? 's' : '') + ')</h4>';
     d.pages.forEach(function(pg, pgIdx) {
       const pgId = 'pg-' + idx + '-' + pgIdx;
       const pgPart = (pg.part_info && pg.part_info.part_number) ? pg.part_info.part_number : '';
@@ -1348,16 +1353,16 @@ function renderDrawingResult(r, idx) {
       const pgLabel = pgPart ? ('Page ' + pg.page + ' - ' + pgPart) : ('Page ' + pg.page);
 
       html += '<div style="border:1px solid #ddd;border-radius:6px;margin-bottom:0.5rem;overflow:hidden">' +
-        '<div onclick="togglePage(this)" data-target="' + pgId + '" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.8rem;background:#f8f8f8;border-bottom:1px solid #eee">' +
-        '<span style="font-weight:600;font-size:0.85rem">' + pgLabel + '</span>' +
+        '<div onclick="togglePage(this)" data-target="' + pgId + '" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0.8rem;background:#f0f6f0;border-bottom:1px solid #d8e8d8">' +
+        '<span style="font-weight:600;font-size:0.9rem;color:#1a3a1a">' + pgLabel + '</span>' +
         '<div>' +
         (pgMat ? '<span class="badge" style="background:#555;font-size:0.7rem">' + pgMat + '</span> ' : '') +
         '<span class="badge" style="background:' + pgConf + ';font-size:0.7rem">' + pgFab + '</span>' +
         '</div></div>' +
-        '<div id="' + pgId + '" class="collapsed" style="padding:0.6rem 0.8rem">';
+        '<div id="' + pgId + '" style="padding:0.6rem 0.8rem">';
 
       // Per-page specs grid
-      html += '<div class="geo-grid" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:0.4rem;margin-bottom:0.5rem">';
+      html += '<div class="geo-grid" style="grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:0.4rem;margin-bottom:0.5rem">';
       if (pg.materials && pg.materials.length) {
         html += '<div class="geo-stat" style="padding:0.4rem"><div class="value" style="font-size:0.8rem">' + (pg.materials[0].name || pg.materials[0].raw_callout) + '</div><div class="label" style="font-size:0.65rem">Material</div></div>';
       }
@@ -1376,7 +1381,7 @@ function renderDrawingResult(r, idx) {
       }
       html += '</div>';
 
-      // Per-page detail table (compact)
+      // Per-page detail table
       html += '<table class="detail-table" style="font-size:0.8rem">';
       if (pg.dimensions && pg.dimensions.length > 1) {
         html += '<tr><th>All dimensions</th><td>' + pg.dimensions.map(function(dm) { let s = dm.length + ' x ' + dm.width; if (dm.height) s += ' x ' + dm.height; return s; }).join('; ') + '</td></tr>';
@@ -1401,7 +1406,7 @@ function renderDrawingResult(r, idx) {
 
       // Per-page features table
       if (pg.features && pg.features.length) {
-        html += '<h5 style="margin:0.6rem 0 0.3rem;color:#0066aa;font-size:0.8rem">Extracted Features (from drawing callouts)</h5>';
+        html += '<h5 style="margin:0.6rem 0 0.3rem;color:#0066aa;font-size:0.8rem">Features</h5>';
         html += '<table class="detail-table" style="font-size:0.8rem"><tr><th>Type</th><th>Count</th><th>Size</th><th>Callout</th></tr>';
         pg.features.forEach(function(f) {
           var size = '';
@@ -1432,18 +1437,79 @@ function renderDrawingResult(r, idx) {
         html += '</div>';
       }
 
-      // Per-page download button
-      const pgReportKey = 'page_' + pg.page + '_report';
-      if (r.files && r.files[pgReportKey]) {
-        html += '<div style="margin-top:0.5rem"><a class="dl-btn" style="font-size:0.75rem;padding:0.3rem 0.8rem" href="' + r.files[pgReportKey] + '" download>Download Page ' + pg.page + ' PDF</a></div>';
-      }
-
       html += '</div></div>';
     });
   }
 
   html += '</div></div>';
   return html;
+}
+
+function exportDrawingCSV(idx) {
+  var r = _allResults.filter(function(x){return !x.error && x.drawing_data;})[idx] || _allResults.filter(function(x){return x.drawing_data;})[0];
+  if (!r || !r.drawing_data) return;
+  var d = r.drawing_data;
+  var rows = [["Field","Value"]];
+  rows.push(["Filename", r.filename]);
+  rows.push(["Fab Type", d.likely_fab_type || "unknown"]);
+  rows.push(["Confidence", d.fab_type_confidence || "low"]);
+  rows.push(["Drawing Pages", d.drawing_page_count || 0]);
+  rows.push(["Total Pages", d.page_count || 0]);
+  if (d.materials && d.materials.length) {
+    rows.push(["Material", (d.materials[0].name || d.materials[0].raw_callout)]);
+  }
+  if (d.thickness && d.thickness.length) {
+    rows.push(["Thickness (in)", d.thickness[0].value_in]);
+    if (d.thickness[0].gauge) rows.push(["Gauge", d.thickness[0].gauge]);
+  }
+  if (d.dimensions && d.dimensions.length) {
+    var dm = d.dimensions[0];
+    rows.push(["Dimensions", dm.length + ' x ' + dm.width + (dm.height ? ' x ' + dm.height : '')]);
+  }
+  var cf = d._computed_flat || {};
+  if (cf.num_bends) rows.push(["Bends", cf.num_bends]);
+  if (cf.flat_width_in) rows.push(["Flat Width (in)", cf.flat_width_in]);
+  if (cf.flat_length_in) rows.push(["Flat Length (in)", cf.flat_length_in]);
+  if (d.features && d.features.length) {
+    rows.push([]);
+    rows.push(["Feature Type","Count","Size","Callout"]);
+    d.features.forEach(function(f) {
+      var size = '';
+      if (f.type === 'round_hole') size = 'Dia ' + f.diameter_in + '"';
+      else if (f.type === 'tapped_hole') size = f.thread_spec;
+      else if (f.type === 'slot') size = f.width_in + ' x ' + f.length_in;
+      rows.push([f.type.replace(/_/g,' '), f.count || 1, size, f.raw || '']);
+    });
+  }
+  if (d.pages && d.pages.length > 1) {
+    d.pages.forEach(function(pg) {
+      rows.push([]);
+      rows.push(["--- Page " + pg.page + " ---"]);
+      if (pg.part_info && pg.part_info.part_number) rows.push(["Part Number", pg.part_info.part_number]);
+      if (pg.materials && pg.materials.length) rows.push(["Material", pg.materials[0].name || pg.materials[0].raw_callout]);
+      if (pg.thickness && pg.thickness.length) rows.push(["Thickness", pg.thickness[0].value_in + '"']);
+      if (pg.dimensions && pg.dimensions.length) {
+        var pdm = pg.dimensions[0];
+        rows.push(["Dimensions", pdm.length + ' x ' + pdm.width]);
+      }
+      if (pg.features && pg.features.length) {
+        pg.features.forEach(function(f) {
+          var size = '';
+          if (f.type === 'round_hole') size = 'Dia ' + f.diameter_in + '"';
+          else if (f.type === 'tapped_hole') size = f.thread_spec;
+          rows.push([f.type.replace(/_/g,' '), f.count || 1, size, f.raw || '']);
+        });
+      }
+    });
+  }
+  var csv = rows.map(function(row) {
+    return row.map(function(c) { return '"' + String(c).replace(/"/g,'""') + '"'; }).join(',');
+  }).join('\n');
+  var blob = new Blob([csv], {type:'text/csv'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = r.filename.replace(/\.[^.]+$/, '') + '_drawing_extract.csv';
+  a.click();
 }
 
 function toggleResult(idx) {
@@ -2138,32 +2204,106 @@ def _generate_drawing_flat_pattern(drawing_data, out_path):
 
 
 def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, source_filename):
-    """Generate an overall PDF report for a drawing analysis (similar to STEP report)."""
+    """Generate a comprehensive multi-page PDF report for drawing analysis with per-page details."""
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch
     from reportlab.lib import colors
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak, HRFlowable
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from datetime import datetime
+    import os
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("DrawTitle", parent=styles["Heading1"], fontSize=16, spaceAfter=8)
-    subtitle_style = ParagraphStyle("DrawSub", parent=styles["Heading2"], fontSize=12, spaceAfter=6, textColor=colors.HexColor("#336699"))
+    title_style = ParagraphStyle("DrawTitle", parent=styles["Heading1"], fontSize=18, spaceAfter=4, textColor=colors.HexColor("#1a3a1a"))
+    subtitle_style = ParagraphStyle("DrawSub", parent=styles["Heading2"], fontSize=12, spaceAfter=6, textColor=colors.HexColor("#2a5a2a"))
+    section_style = ParagraphStyle("DrawSec", parent=styles["Heading2"], fontSize=14, spaceAfter=6, spaceBefore=8, textColor=colors.HexColor("#0066aa"))
     normal = styles["Normal"]
+    small = ParagraphStyle("DrawSmall", parent=normal, fontSize=8, textColor=colors.HexColor("#666666"))
+
+    GREEN = colors.HexColor("#2a5a2a")
+    BLUE = colors.HexColor("#0066aa")
+    LIGHT_GREEN = colors.HexColor("#f4f8f4")
+    LIGHT_BLUE = colors.HexColor("#f0f6ff")
+
+    def _specs_table_style():
+        return TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), GREEN),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT_GREEN]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ])
+
+    def _feat_table_style():
+        return TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), BLUE),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT_BLUE]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ])
+
+    def _feat_size(ft):
+        if ft["type"] in ("round_hole", "counterbored_hole", "countersunk_hole"):
+            s = f'Dia {ft.get("diameter_in", "?")}"'
+            if ft.get("cbore_dia_in"): s += f' CBORE {ft["cbore_dia_in"]}"'
+            if ft.get("csink_dia_in"): s += f' CSINK {ft["csink_dia_in"]}"'
+            if ft.get("through"): s += " THRU"
+            return s
+        elif ft["type"] == "tapped_hole":
+            s = ft.get("thread_spec", "?")
+            if ft.get("through"): s += " THRU"
+            return s
+        elif ft["type"] == "slot":
+            return f'{ft.get("width_in", "?")}" x {ft.get("length_in", "?")}"'
+        return ft.get("raw", "")
 
     doc = SimpleDocTemplate(out_path, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
     story = []
 
-    # Title
+    # ========== PAGE 1: COVER / OVERALL SUMMARY ==========
     part_num = drawing_data.get("part_info", {}).get("part_number", "")
-    title = f"Drawing Analysis Report - {source_filename}"
-    if part_num:
-        title += f" ({part_num})"
+    title = f"Drawing Analysis Report"
     story.append(Paragraph(title, title_style))
+    story.append(Paragraph(f"<b>Source:</b> {source_filename}" + (f"  |  <b>Part:</b> {part_num}" if part_num else ""), normal))
+    story.append(Paragraph(f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", small))
+    story.append(Spacer(1, 6))
+
     if drawing_data.get("summary"):
         story.append(Paragraph(drawing_data["summary"], normal))
+        story.append(Spacer(1, 8))
+
+    # Drawing page summary bar
+    pages = drawing_data.get("pages", [])
+    total_pages = drawing_data.get("page_count", len(pages))
+    drawing_pages = drawing_data.get("drawing_page_count", len(pages))
+    fab = drawing_data.get("likely_fab_type", "unknown")
+    conf = drawing_data.get("fab_type_confidence", "low")
+    fab_label = "Sheet Metal" if fab == "sheet_metal" else fab.replace("_", " ").title()
+
+    summary_rows = [["Drawing Pages", "Total Pages", "Fab Type", "Confidence"]]
+    summary_rows.append([str(drawing_pages), str(total_pages), fab_label, conf.title()])
+    sum_tbl = Table(summary_rows, colWidths=[1.6*inch, 1.6*inch, 2*inch, 1.6*inch])
+    sum_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), GREEN),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT_GREEN]),
+    ]))
+    story.append(sum_tbl)
     story.append(Spacer(1, 12))
 
-    # Geometry stats table
+    # Overall geometry specs
     computed = drawing_data.get("_computed_flat", {})
     rows = [["Property", "Value"]]
     if drawing_data.get("materials"):
@@ -2173,6 +2313,11 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
         thk = drawing_data.get("thickness", [{}])
         gauge_str = f' ({thk[0]["gauge"]} GA)' if thk and thk[0].get("gauge") else ""
         rows.append(["Thickness", f'{computed["thickness_in"]}"{gauge_str}'])
+    if drawing_data.get("dimensions"):
+        dm0 = drawing_data["dimensions"][0]
+        dim_str = f'{dm0["length"]}" x {dm0["width"]}"'
+        if dm0.get("height"): dim_str += f' x {dm0["height"]}"'
+        rows.append(["Overall Dimensions", dim_str])
     if computed.get("flat_width_in"):
         rows.append(["Developed Width", f'{computed["flat_width_in"]}"'])
     if computed.get("flat_length_in"):
@@ -2182,31 +2327,20 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
         rows.append(["Bend Angles", ", ".join(f'{a:.0f} deg' for a in computed.get("bend_angles", []))])
         rows.append(["Bend Radius", f'{computed.get("bend_radius_in", 0)}"'])
         rows.append(["K-factor", str(computed.get("k_factor", 0.44))])
+    if drawing_data.get("tolerances"):
+        tols = ", ".join(t["raw"] for t in drawing_data["tolerances"][:5] if t.get("raw"))
+        if tols: rows.append(["Tolerances", tols])
     if drawing_data.get("finishes"):
         rows.append(["Finish", ", ".join(f["finish"] for f in drawing_data["finishes"])])
-    fab = drawing_data.get("likely_fab_type", "unknown")
-    conf = drawing_data.get("fab_type_confidence", "low")
-    rows.append(["Fab Type", f"{fab} ({conf} confidence)"])
 
     if len(rows) > 1:
-        story.append(Paragraph("Extracted Specifications", subtitle_style))
-        col_widths = [2 * inch, 4.5 * inch]
-        tbl = Table(rows, colWidths=col_widths)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2a5a2a")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f4f4")]),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ]))
+        story.append(Paragraph("Overall Specifications", subtitle_style))
+        tbl = Table(rows, colWidths=[2*inch, 4.5*inch])
+        tbl.setStyle(_specs_table_style())
         story.append(tbl)
         story.append(Spacer(1, 12))
 
     # Flat pattern image
-    import os
     if flat_pattern_path and os.path.isfile(flat_pattern_path):
         story.append(Paragraph("Computed Flat Pattern", subtitle_style))
         try:
@@ -2216,40 +2350,115 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
         except Exception:
             pass
 
-    # Features table (combined from all pages)
+    # Combined features table
     all_feats = drawing_data.get("features", [])
     if all_feats:
-        story.append(Paragraph("Extracted Features", subtitle_style))
+        story.append(Paragraph("All Extracted Features (Combined)", subtitle_style))
         feat_rows = [["Type", "Count", "Size", "Callout"]]
         for ft in all_feats:
-            ftype = ft.get("type", "").replace("_", " ")
-            count = str(ft.get("count", 1))
-            if ft["type"] in ("round_hole", "counterbored_hole", "countersunk_hole"):
-                size = f'Dia {ft.get("diameter_in", "?")}"'
-                if ft.get("through"):
-                    size += " THRU"
-            elif ft["type"] == "tapped_hole":
-                size = ft.get("thread_spec", "?")
-                if ft.get("through"):
-                    size += " THRU"
-            elif ft["type"] == "slot":
-                size = f'{ft.get("width_in", "?")}" x {ft.get("length_in", "?")}"'
-            else:
-                size = ft.get("raw", "")
-            feat_rows.append([ftype, count, size, ft.get("raw", "")])
-        feat_col_widths = [1.2*inch, 0.6*inch, 2.5*inch, 2.5*inch]
-        feat_tbl = Table(feat_rows, colWidths=feat_col_widths)
-        feat_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0066aa")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f6ff")]),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ]))
+            feat_rows.append([ft.get("type", "").replace("_", " "), str(ft.get("count", 1)), _feat_size(ft), ft.get("raw", "")])
+        feat_tbl = Table(feat_rows, colWidths=[1.2*inch, 0.6*inch, 2.5*inch, 2.5*inch])
+        feat_tbl.setStyle(_feat_table_style())
         story.append(feat_tbl)
+        story.append(Spacer(1, 8))
+
+    # ========== PER-PAGE DETAIL SECTIONS ==========
+    if pages:
+        story.append(PageBreak())
+        story.append(Paragraph("Per-Page Detail Breakdown", title_style))
+        story.append(Spacer(1, 8))
+
+        for pi, pg in enumerate(pages):
+            pg_num = pg.get("page", pi + 1)
+            pg_part = pg.get("part_info", {}).get("part_number", "")
+            pg_fab = pg.get("likely_fab_type", "unknown")
+            pg_conf = pg.get("fab_type_confidence", "low")
+            pg_fab_label = "Sheet Metal" if pg_fab == "sheet_metal" else pg_fab.replace("_", " ").title()
+
+            pg_title = f"Page {pg_num}"
+            if pg_part: pg_title += f" - {pg_part}"
+            story.append(Paragraph(pg_title, section_style))
+
+            # Page header bar
+            pg_header = [["Fab Type", "Confidence"]]
+            pg_header.append([pg_fab_label, pg_conf.title()])
+            pg_info_extras = []
+            if pg.get("part_info", {}).get("quantity"):
+                pg_header[0].append("Qty")
+                pg_header[1].append(str(pg["part_info"]["quantity"]))
+            if pg.get("part_info", {}).get("revision"):
+                pg_header[0].append("Rev")
+                pg_header[1].append(pg["part_info"]["revision"])
+            cw = [2*inch] * len(pg_header[0])
+            pg_bar = Table(pg_header, colWidths=cw)
+            pg_bar.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [LIGHT_BLUE]),
+            ]))
+            story.append(pg_bar)
+            story.append(Spacer(1, 6))
+
+            # Page specs table
+            pg_rows = [["Property", "Value"]]
+            if pg.get("materials"):
+                mats = ", ".join(m.get("name") or m["raw_callout"] for m in pg["materials"])
+                pg_rows.append(["Material", mats])
+            if pg.get("thickness"):
+                thk = ", ".join(f'{t["value_in"]}"' + (f' ({t["gauge"]} GA)' if t.get("gauge") else "") for t in pg["thickness"])
+                pg_rows.append(["Thickness", thk])
+            if pg.get("dimensions"):
+                dims = "; ".join(
+                    f'{d["length"]} x {d["width"]}' + (f' x {d["height"]}' if d.get("height") else "")
+                    for d in pg["dimensions"][:8]
+                )
+                pg_rows.append(["Dimensions", dims])
+            if pg.get("tolerances"):
+                tols = ", ".join(t["raw"] for t in pg["tolerances"][:5] if t.get("raw"))
+                if tols: pg_rows.append(["Tolerances", tols])
+            bends = pg.get("bends", {})
+            if bends.get("radii"):
+                pg_rows.append(["Bend Radii", ", ".join(b["raw"] for b in bends["radii"])])
+            if bends.get("angles"):
+                pg_rows.append(["Bend Angles", ", ".join(b["raw"] for b in bends["angles"])])
+            if pg.get("finishes"):
+                pg_rows.append(["Finish", ", ".join(f["finish"] for f in pg["finishes"])])
+            if pg.get("part_info", {}).get("scale"):
+                pg_rows.append(["Scale", pg["part_info"]["scale"]])
+
+            if len(pg_rows) > 1:
+                pg_tbl = Table(pg_rows, colWidths=[2*inch, 4.5*inch])
+                pg_tbl.setStyle(_specs_table_style())
+                story.append(pg_tbl)
+                story.append(Spacer(1, 6))
+
+            # Page features
+            pg_feats = pg.get("features", [])
+            if pg_feats:
+                story.append(Paragraph("Features", ParagraphStyle("PgFeat", parent=subtitle_style, fontSize=10)))
+                pg_feat_rows = [["Type", "Count", "Size", "Callout"]]
+                for ft in pg_feats:
+                    pg_feat_rows.append([ft.get("type", "").replace("_", " "), str(ft.get("count", 1)), _feat_size(ft), ft.get("raw", "")])
+                pg_feat_tbl = Table(pg_feat_rows, colWidths=[1.2*inch, 0.6*inch, 2.5*inch, 2.5*inch])
+                pg_feat_tbl.setStyle(_feat_table_style())
+                story.append(pg_feat_tbl)
+                story.append(Spacer(1, 6))
+
+            # Page missing info
+            missing = pg.get("missing_info", [])
+            if missing:
+                story.append(Paragraph("Missing Information", ParagraphStyle("PgMiss", parent=subtitle_style, fontSize=10, textColor=colors.HexColor("#b8860b"))))
+                for mi in missing:
+                    story.append(Paragraph(f"* <b>{mi['field']}</b>: {mi['message']}", small))
+                story.append(Spacer(1, 6))
+
+            # Separator between pages
+            if pi < len(pages) - 1:
+                story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cccccc"), spaceAfter=8, spaceBefore=4))
 
     doc.build(story)
 
