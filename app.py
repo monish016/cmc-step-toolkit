@@ -29,7 +29,8 @@ app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
 app.config["UPLOAD_FOLDER"] = "/tmp/step_uploads"
 
 ALLOWED_EXTENSIONS = {"step", "stp", "STEP", "STP", "pdf", "PDF", "dwg", "DWG", "dxf", "DXF",
-                      "xlsx", "XLSX", "xls", "XLS", "csv", "CSV"}
+                      "xlsx", "XLSX", "xls", "XLS", "csv", "CSV",
+                      "sldprt", "SLDPRT", "sldasm", "SLDASM", "igs", "IGS", "iges", "IGES"}
 
 # ---------- SQLite persistent job history ----------
 DB_DIR = os.environ.get("DATA_DIR", "/data")
@@ -451,10 +452,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <h2>Upload files</h2>
       <form id="uploadForm" enctype="multipart/form-data">
         <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
-          <p id="dropText">Drag and drop .STEP, .STP, .PDF, or .DWG files here, or click to browse</p>
+          <p id="dropText">Drag and drop .STEP, .STP, .SLDPRT, .IGS, .PDF, or .DWG files here, or click to browse</p>
           <div class="hint">Max 100 MB per file. Multiple files supported. STEP for 3D analysis, PDF/DWG for drawing extraction.</div>
         </div>
-        <input type="file" id="fileInput" name="step_file" accept=".step,.stp,.STEP,.STP,.pdf,.PDF,.dwg,.DWG,.dxf,.DXF" multiple>
+        <input type="file" id="fileInput" name="step_file" accept=".step,.stp,.STEP,.STP,.pdf,.PDF,.dwg,.DWG,.dxf,.DXF,.sldprt,.SLDPRT,.sldasm,.SLDASM,.igs,.IGS,.iges,.IGES" multiple>
         <div class="file-list" id="fileList"></div>
         <div class="params">
           <div class="param-group">
@@ -532,6 +533,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="card">
       <h2>Revision History</h2>
       <div style="max-width:800px">
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9 - September 18, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">SLDPRT/IGES Format Support</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Accept SolidWorks native files (.sldprt, .sldasm) with auto-conversion to STEP</li>
+            <li>Accept IGES format (.igs, .iges) with built-in OCP conversion to STEP</li>
+            <li>Graceful error handling with clear SolidWorks export instructions when conversion unavailable</li>
+          </ul>
+        </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
           <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.8 - September 17, 2026</div>
@@ -671,9 +682,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.8</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v3.9</div>
 
 <script>
+// --- Utility ---
+function hideParent(el) { if (el && el.parentElement) el.parentElement.style.display = 'none'; }
+
 // --- Tab switching ---
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -762,7 +776,7 @@ function renderFileList() {
   if (selectedFiles.length === 0) {
     list.innerHTML = "";
     submitBtn.disabled = true;
-    document.getElementById("dropText").textContent = "Drag and drop .STEP, .STP, .PDF, or .DWG files here, or click to browse";
+    document.getElementById("dropText").textContent = "Drag and drop .STEP, .STP, .SLDPRT, .IGS, .PDF, or .DWG files here, or click to browse";
     return;
   }
   submitBtn.disabled = false;
@@ -2228,6 +2242,77 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
     doc.build(story)
 
 
+def _convert_cad_to_step(input_path, output_path):
+    """Convert SLDPRT/SLDASM/IGS/IGES to STEP using available converters."""
+    ext = os.path.splitext(input_path)[1].lower()
+
+    # IGES: use OCP directly (already installed with CadQuery)
+    if ext in ('.igs', '.iges'):
+        try:
+            from OCP.IGESControl import IGESControl_Reader
+            from OCP.IFSelect import IFSelect_RetDone
+            from OCP.STEPControl import STEPControl_Writer, STEPControl_AsIs
+            reader = IGESControl_Reader()
+            status = reader.ReadFile(input_path)
+            if status == IFSelect_RetDone:
+                reader.TransferRoots()
+                shape = reader.OneShape()
+                writer = STEPControl_Writer()
+                writer.Transfer(shape, STEPControl_AsIs)
+                write_status = writer.Write(output_path)
+                if write_status == 1 and os.path.exists(output_path):
+                    return True, None
+            return False, "Failed to read IGES file - it may be corrupt or unsupported."
+        except Exception as e:
+            return False, f"IGES conversion error: {str(e)[:200]}"
+
+    # SLDPRT/SLDASM: try FreeCAD (must be installed separately)
+    if ext in ('.sldprt', '.sldasm'):
+        try:
+            conv_script = f"""
+import sys, os
+try:
+    import FreeCAD
+    import Part
+    import Import
+    doc = FreeCAD.newDocument("conv")
+    Import.insert("{input_path}", doc.Name)
+    if not doc.Objects:
+        print("ERROR:No objects imported")
+        sys.exit(1)
+    Part.export(doc.Objects, "{output_path}")
+    FreeCAD.closeDocument(doc.Name)
+    print("OK")
+except Exception as e:
+    print(f"ERROR:{{e}}")
+    sys.exit(1)
+"""
+            result = subprocess.run(
+                ["python3", "-c", conv_script],
+                capture_output=True, text=True, timeout=60
+            )
+            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True, None
+            stderr = (result.stderr or result.stdout or "").strip()
+            if "No module named" in stderr or "ModuleNotFoundError" in stderr:
+                fmt = "SolidWorks" if ext == ".sldprt" else "SolidWorks Assembly"
+                return False, (
+                    f"This {fmt} file cannot be converted automatically on this server. "
+                    "Please export it as STEP format from SolidWorks: "
+                    "File -> Save As -> Save as type: STEP AP214 (*.step;*.stp)"
+                )
+            return False, f"Conversion failed: {stderr[-200:]}"
+        except subprocess.TimeoutExpired:
+            return False, "SolidWorks file conversion timed out."
+        except Exception as e:
+            return False, (
+                "SLDPRT/SLDASM files require conversion to STEP format. "
+                "Please export from SolidWorks: File -> Save As -> Save as type: STEP AP214 (*.step;*.stp)"
+            )
+
+    return False, f"Unsupported CAD format: {ext}"
+
+
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
@@ -2240,11 +2325,12 @@ def analyze():
 
     file = request.files["step_file"]
     if not file or not allowed_file(file.filename):
-        return jsonify({"error": "Invalid file type. Upload a .STEP, .STP, .PDF, or .DWG file."}), 400
+        return jsonify({"error": "Invalid file type. Upload a .STEP, .STP, .SLDPRT, .SLDASM, .IGS, .IGES, .PDF, or .DWG file."}), 400
 
     # Determine file type
     file_ext = file.filename.rsplit(".", 1)[1].lower() if "." in file.filename else ""
     is_drawing = file_ext in ("pdf", "dwg", "dxf")
+    is_native_cad = file_ext in ("sldprt", "sldasm", "igs", "iges")
 
     try:
         raw_density = request.form.get("density", "7.9")
@@ -2377,6 +2463,14 @@ def analyze():
             print(f"Warning: Failed to save job to DB: {db_err}")
 
         return jsonify({"drawing_data": drawing_data, "files": files, "job_id": job_id})
+
+    # ---- CAD format conversion (SLDPRT/SLDASM/IGS/IGES -> STEP) ----
+    if is_native_cad:
+        converted_path = os.path.join(job_dir, part_stem + "_converted.step")
+        success, err_msg = _convert_cad_to_step(file_path, converted_path)
+        if not success:
+            return jsonify({"error": err_msg or "CAD file conversion failed."}), 400
+        file_path = converted_path  # Use converted STEP file from here on
 
     # ---- STEP analysis path ----
     step_path = file_path
