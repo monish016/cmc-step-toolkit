@@ -1858,13 +1858,13 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # are separated by the full part width (~95mm for this geometry).
     _bb_dims = sorted([bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"],
                        bb["zmax"]-bb["zmin"]])
-    # Cap dedup threshold to 15mm.  Previous formula (_bb_dims[1]/2.5) gave
-    # 80mm+ on wide parts, incorrectly merging distinct holes with the same
-    # diameter that happened to share similar L positions.  15mm is generous
-    # for same-hole fragments (which project within ~2mm in 2D) while keeping
-    # distinct holes separate.  The bend-fragmentation force-merge (below)
-    # handles the edge case of >2 fragments with matching u-position.
-    _dedup_2d_threshold = 15.0
+    # Cap dedup threshold to 5mm.  Same-hole fragments project within ~2mm
+    # in 2D, so 5mm gives 2.5x safety margin.  Previous 15mm was too generous
+    # and merged distinct holes on adjacent flanges of bent channel parts
+    # (e.g. CA260504D-PX04: 36 detected vs 40 actual).
+    # The bend-fragmentation force-merge (below) handles the edge case of
+    # >2 fragments with matching u-position.
+    _dedup_2d_threshold = 5.0
 
     deduped = []
     for (_gk, _gL), members in _groups.items():
