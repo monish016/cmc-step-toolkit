@@ -1088,10 +1088,13 @@ def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
             # blends or tiny fillets, never standalone features.
             if sweep_deg < 45:
                 continue
+            # Store cylinder axis direction for flange-aware dedup
+            cyl_ax = cylg.Axis().Direction()
             candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
                                 "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area,
                                 "kind": "cyl", "radius": r,
-                                "u_sweep": sweep_deg})
+                                "u_sweep": sweep_deg,
+                                "cyl_axis": (cyl_ax.X(), cyl_ax.Y(), cyl_ax.Z())})
     return candidates
 
 
@@ -1231,8 +1234,13 @@ def classify_cluster(members):
             if r_avg * 2 / 25.4 < 0.08:
                 return None
             dia_in = 2 * r_avg / 25.4
-            return {"type": "round",
+            feat = {"type": "round",
                     "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+            # Store representative axis direction for flange-aware dedup
+            axes = [c.get("cyl_axis") for c in full_circle_cyls if c.get("cyl_axis")]
+            if axes:
+                feat["_hole_axis"] = axes[0]
+            return feat
 
         # Case 1b: Partial cyls that are large arcs (>=140 deg, i.e. semicircles)
         # forming a full circle, even when mixed with planar faces.
@@ -1247,9 +1255,13 @@ def classify_cluster(members):
                     r_avg = sum(radii_la) / len(radii_la)
                     if r_avg * 2 / 25.4 >= 0.08:
                         dia_in = 2 * r_avg / 25.4
-                        return {"type": "round",
+                        feat = {"type": "round",
                                 "diameter_in": round(dia_in, 3),
                                 "center": (cx, cy, cz), "confidence": "high"}
+                        axes = [c.get("cyl_axis") for c in large_arcs if c.get("cyl_axis")]
+                        if axes:
+                            feat["_hole_axis"] = axes[0]
+                        return feat
 
         # Case 2: Only partial arcs (corner fillets) + planar faces = SQUARE/RECT hole
         if partial_cyls and n_planar >= 2:
@@ -1263,9 +1275,13 @@ def classify_cluster(members):
             # High aspect ratio = edge notch/relief, not a hole — filter out
             if d2 > 0 and d1 / d2 > 4:
                 return None
-            return {"type": "square_or_rect",
+            feat = {"type": "square_or_rect",
                     "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                     "center": (cx, cy, cz), "confidence": "high"}
+            axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+            if axes:
+                feat["_hole_axis"] = axes[0]
+            return feat
 
         # Case 3: Partial arcs without enough planars — likely corner fillets
         # that didn't cluster with their planar walls. Check if they form
@@ -1282,9 +1298,13 @@ def classify_cluster(members):
                     r_avg = sum(radii_pc) / len(radii_pc)
                     if r_avg * 2 / 25.4 >= 0.08:
                         dia_in = 2 * r_avg / 25.4
-                        return {"type": "round",
+                        feat = {"type": "round",
                                 "diameter_in": round(dia_in, 3), "center": (cx, cy, cz),
                                 "confidence": "medium"}
+                        axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+                        if axes:
+                            feat["_hole_axis"] = axes[0]
+                        return feat
                 xl, yl, zl = spread
                 dims = sorted([xl, yl, zl], reverse=True)
                 d1, d2 = dims[0], dims[1]
@@ -1292,9 +1312,13 @@ def classify_cluster(members):
                     # High aspect ratio = edge notch/relief — filter out
                     if d2 > 0 and d1 / d2 > 4:
                         return None
-                    return {"type": "square_or_rect",
+                    feat = {"type": "square_or_rect",
                             "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                             "center": (cx, cy, cz), "confidence": "medium"}
+                    axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+                    if axes:
+                        feat["_hole_axis"] = axes[0]
+                    return feat
 
         # Case 3b: Multiple partial cylinders whose sweeps sum to ~360°
         # = round hole split into segments by the CAD kernel (e.g. two 180° halves)
@@ -1307,8 +1331,12 @@ def classify_cluster(members):
                 if r_avg * 2 / 25.4 < 0.08:
                     return None
                 dia_in = 2 * r_avg / 25.4
-                return {"type": "round",
+                feat = {"type": "round",
                         "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+                axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+                if axes:
+                    feat["_hole_axis"] = axes[0]
+                return feat
 
         # Case 4: Mixed or ambiguous — fall back to checking if it's round
         if full_circle_cyls:
@@ -1317,8 +1345,12 @@ def classify_cluster(members):
             if r_avg * 2 / 25.4 < 0.08:
                 return None
             dia_in = 2 * r_avg / 25.4
-            return {"type": "round",
+            feat = {"type": "round",
                     "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "medium"}
+            axes = [c.get("cyl_axis") for c in full_circle_cyls if c.get("cyl_axis")]
+            if axes:
+                feat["_hole_axis"] = axes[0]
+            return feat
 
         # Partial cyls only, few of them — likely edge fillets, not a feature
         if len(partial_cyls) <= 2 and n_planar == 0:
@@ -1743,8 +1775,11 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         v_axis = norm3(cross(ax, u_axis))
         return (sum(p3d[k]*u_axis[k] for k in range(3)), sum(p3d[k]*v_axis[k] for k in range(3)))
 
+    _transverse_miss_log = []  # collect diagnostic info for first few misses
+
     def transverse_pos_mm(y_z):
         best = None
+        perp_tol = max(thickness_mm, 3.0) + 2.0  # increased from +1.0 for robustness
         for seg in layout:
             if seg["kind"] != "flat":
                 continue
@@ -1754,11 +1789,27 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             tproj = v[0]*d[0] + v[1]*d[1]
             perp = abs(v[0]*d[1] - v[1]*d[0])
             seglen = seg["end"] - seg["start"]
-            perp_tol = max(thickness_mm, 3.0) + 1.0
             if -3 <= tproj <= seglen+3 and perp < perp_tol:
                 cand = seg["start"] + max(0, min(seglen, tproj))
                 if best is None or perp < best[1]:
                     best = (cand, perp)
+        if best is None and len(_transverse_miss_log) < 3:
+            # Log diagnostic info for the first few misses
+            seg_info = []
+            for seg in layout:
+                if seg["kind"] != "flat":
+                    continue
+                p0, p1 = seg["p0"], seg["p1"]
+                d = norm2((p1[0]-p0[0], p1[1]-p0[1]))
+                v = (y_z[0]-p0[0], y_z[1]-p0[1])
+                tproj = v[0]*d[0] + v[1]*d[1]
+                perp = abs(v[0]*d[1] - v[1]*d[0])
+                seglen = seg["end"] - seg["start"]
+                seg_info.append({"seglen": round(seglen, 1),
+                                 "tproj": round(tproj, 1), "perp": round(perp, 1),
+                                 "perp_tol": round(perp_tol, 1)})
+            _transverse_miss_log.append({"hole_2d": (round(y_z[0], 1), round(y_z[1], 1)),
+                                         "segs": seg_info})
         return best[0] if best else None
 
     corners = [(bb["xmin"] if i&1 else bb["xmax"],
@@ -1858,13 +1909,22 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # are separated by the full part width (~95mm for this geometry).
     _bb_dims = sorted([bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"],
                        bb["zmax"]-bb["zmin"]])
-    # Cap dedup threshold to 5mm.  Same-hole fragments project within ~2mm
-    # in 2D, so 5mm gives 2.5x safety margin.  Previous 15mm was too generous
-    # and merged distinct holes on adjacent flanges of bent channel parts
-    # (e.g. CA260504D-PX04: 36 detected vs 40 actual).
-    # The bend-fragmentation force-merge (below) handles the edge case of
-    # >2 fragments with matching u-position.
-    _dedup_2d_threshold = 5.0
+    # Dedup thresholds:
+    # - Same-flange (parallel axes or no axis info): 5mm.  Same-hole fragments
+    #   project within ~2mm in 2D, so 5mm gives 2.5x safety margin.
+    # - Cross-flange (non-parallel axes, angle > 15 deg): 3mm.  Only true
+    #   bend-split fragments are this close; distinct holes on adjacent flanges
+    #   are further apart.  This prevents the PX04-style false merges permanently.
+    _DEDUP_SAME_FLANGE = 5.0
+    _DEDUP_CROSS_FLANGE = 3.0
+
+    def _axes_parallel(a1, a2, tol_deg=15):
+        """Check if two axis vectors are parallel (within tol_deg)."""
+        if a1 is None or a2 is None:
+            return True  # unknown = assume same flange (conservative)
+        dot = abs(sum(a1[k]*a2[k] for k in range(3)))
+        # dot = |cos(angle)|; cos(15 deg) ~ 0.966
+        return dot > math.cos(math.radians(tol_deg))
 
     deduped = []
     for (_gk, _gL), members in _groups.items():
@@ -1889,7 +1949,10 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
                             d = math.dist(f["_2d"], rep["_2d"])
                         else:
                             d = 999
-                        if d < _dedup_2d_threshold:
+                        # Flange-aware threshold: tighter for cross-flange pairs
+                        parallel = _axes_parallel(f.get("_hole_axis"), rep.get("_hole_axis"))
+                        thresh = _DEDUP_SAME_FLANGE if parallel else _DEDUP_CROSS_FLANGE
+                        if d < thresh:
                             cluster.append(f)
                             placed = True
                             break
@@ -1917,9 +1980,16 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     # Clean up temp keys
     for f in deduped:
         f.pop("_2d", None)
+        f.pop("_hole_axis", None)
     _debug_info["pre_dedup_count"] = _debug_info["classified_count"] + _debug_info["num_slots"]
     _debug_info["post_dedup_count"] = len(deduped)
-    _debug_info["dedup_2d_threshold_mm"] = round(_dedup_2d_threshold, 1)
+    _debug_info["dedup_thresholds"] = {"same_flange": _DEDUP_SAME_FLANGE,
+                                       "cross_flange": _DEDUP_CROSS_FLANGE}
+    _t_none_count = sum(1 for f in deduped if f.get("transverse_in") is None)
+    _debug_info["transverse_none_count"] = _t_none_count
+    if _transverse_miss_log:
+        _debug_info["transverse_miss_samples"] = _transverse_miss_log
+    _debug_info["layout_segments"] = len([s for s in layout if s["kind"] == "flat"])
     features = deduped
 
     # --- Gauge auto-detection ---
