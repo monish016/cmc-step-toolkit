@@ -53,6 +53,8 @@ COPY generate_report.py .
 COPY drawing_extractor.py .
 COPY drawing_layout.py .
 COPY iso286.py .
+COPY regression.py .
+COPY regression_expected.json .
 COPY app.py .
 COPY cost_engine.py .
 COPY INSTRUCTIONS.md .
