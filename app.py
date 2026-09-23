@@ -1302,6 +1302,18 @@ function renderDrawingResult(r, idx) {
     d.tolerances.forEach(function(t) { if (t.raw && !seenTol[t.raw]) { seenTol[t.raw] = true; uniqTol.push(t.raw); }});
     if (uniqTol.length) html += '<tr><th>Tolerances</th><td>' + uniqTol.slice(0,10).join(', ') + '</td></tr>';
   }
+  var pinf = d.part_info || {};
+  if (pinf.title) html += '<tr><th>Part title</th><td>' + pinf.title + '</td></tr>';
+  if (pinf.part_number) html += '<tr><th>Drawing no.</th><td>' + pinf.part_number + (pinf.revision ? ' &nbsp;Rev ' + pinf.revision : '') + '</td></tr>';
+  if (d.material_callout) html += '<tr><th>Material callout</th><td>' + d.material_callout + '</td></tr>';
+  (d.tolerances || []).forEach(function(t) {
+    if (t.note) html += '<tr><th>Fit check</th><td style="color:#b8860b">' + t.raw + ' - ' + t.note + '</td></tr>';
+  });
+  if (d.tightest_tolerance_in) {
+    var tt = d.tightest_tolerance_in;
+    var tnote = tt <= 0.0005 ? ' (precision - grinding likely)' : (tt <= 0.001 ? ' (tight - precision turning/boring)' : '');
+    html += '<tr><th>Tightest tolerance band</th><td>' + tt + '"' + tnote + '</td></tr>';
+  }
   if (isMachined) {
     if (stk.od_in) html += '<tr><th>Raw stock</th><td>Round bar ' + stk.od_in + '" OD' + (stk.id_in ? ' / ' + stk.id_in + '" ID' : '') + (stk.overall_length_in ? ' x ' + stk.overall_length_in + '" long' : '') + '</td></tr>';
     if (stk.diameters_in && stk.diameters_in.length > 1) html += '<tr><th>Turned diameters</th><td>' + stk.diameters_in.map(function(v){return v + '"';}).join(', ') + '</td></tr>';
@@ -1485,6 +1497,10 @@ function exportDrawingCSV(idx) {
   if (ms.overall_length_in) rows.push(["Overall Length (in)", ms.overall_length_in]);
   if (ms.stock_weight_lb) rows.push(["Stock Weight (lb)", ms.stock_weight_lb]);
   if (d.part_info && d.part_info.quantity) rows.push(["Qty Required", d.part_info.quantity]);
+  if (d.part_info && d.part_info.part_number) rows.push(["Drawing No", d.part_info.part_number]);
+  if (d.part_info && d.part_info.title) rows.push(["Part Title", d.part_info.title]);
+  if (d.material_callout) rows.push(["Material Callout", d.material_callout]);
+  if (d.tightest_tolerance_in) rows.push(["Tightest Tolerance (in)", d.tightest_tolerance_in]);
   if (d.tolerances && d.tolerances.length) rows.push(["Tolerances", d.tolerances.map(function(t){return t.raw;}).join('; ')]);
   if (cf.num_bends) rows.push(["Bends", cf.num_bends]);
   if (cf.flat_width_in) rows.push(["Flat Width (in)", cf.flat_width_in]);
@@ -2337,6 +2353,18 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
         dim_str = f'{dm0["length"]}" x {dm0["width"]}"'
         if dm0.get("height"): dim_str += f' x {dm0["height"]}"'
         rows.append(["Overall Dimensions", dim_str])
+    _pi = drawing_data.get("part_info", {}) or {}
+    if _pi.get("title"):
+        rows.insert(1, ["Part Title", _pi["title"]])
+    if drawing_data.get("material_callout"):
+        rows.append(["Material Callout", drawing_data["material_callout"]])
+    for _t in drawing_data.get("tolerances", []) or []:
+        if _t.get("note"):
+            rows.append(["Fit Check", f'{_t["raw"]} - {_t["note"]}'])
+    if drawing_data.get("tightest_tolerance_in"):
+        _tt = drawing_data["tightest_tolerance_in"]
+        _tn = " (precision - grinding likely)" if _tt <= 0.0005 else (" (tight - precision turning/boring)" if _tt <= 0.001 else "")
+        rows.append(["Tightest Tolerance", f'{_tt}"{_tn}'])
     stk = drawing_data.get("machined_stock") or {}
     if stk.get("od_in"):
         s_txt = f'Round bar {stk["od_in"]}" OD'

@@ -18,6 +18,16 @@ try:
 except ImportError:
     fitz = None
 
+try:
+    import drawing_layout
+except Exception:  # layout parsing is optional - regex extraction still works
+    drawing_layout = None
+
+try:
+    import iso286
+except Exception:
+    iso286 = None
+
 # ── Material database ──────────────────────────────────────────────────
 KNOWN_MATERIALS = {
     # Stainless steels
@@ -1090,7 +1100,118 @@ def identify_missing_info(result):
     return missing
 
 
-def _analyze_single_page(page_text, page_num):
+# ── Layout (coordinate) enrichment ─────────────────────────────────────
+
+def _fmt_dev(v):
+    s = f"{abs(v):.4f}".rstrip("0")
+    s = s[1:] if s.startswith("0.") else s
+    if "." in s:
+        while len(s.split(".")[1]) < 3:
+            s += "0"
+    return ("+" if v >= 0 else "-") + s
+
+
+def _annotate_fit(t):
+    """Attach ISO 286 limits to a fit tolerance and flag tightness / case mix-ups."""
+    if iso286 is None or not t.get("fit_class") or not t.get("nominal_in"):
+        return t
+    cls = t["fit_class"]
+    iso = iso286.fit_limits_in(t["nominal_in"], cls)
+    if iso:
+        t["iso_limits"] = iso
+    printed = t.get("deviations_in") or []
+    if len(printed) >= 2:
+        up, lo = max(printed), min(printed)
+        t["band_in"] = round(up - lo, 4)
+        # Printed limits that look like the opposite case (F7 printed with shaft-style
+        # negative limits usually means f7) are worth flagging for the estimator.
+        if iso and ((up <= 0) != (iso["upper_in"] <= 0)):
+            swapped = cls.swapcase()
+            alt = iso286.fit_limits_in(t["nominal_in"], swapped)
+            if alt and ((up <= 0) == (alt["upper_in"] <= 0)):
+                t["note"] = f"Printed limits match ISO {swapped} ({alt['kind']}), not {cls}"
+    elif iso:
+        t["band_in"] = iso["band_in"]
+        t["raw"] = f"{t['raw'].split(' (')[0]} (ISO {_fmt_dev(iso['upper_in'])}/{_fmt_dev(iso['lower_in'])})"
+    return t
+
+
+def apply_layout(result, words):
+    """Enrich regex results with coordinate-based title block + stacked tolerances."""
+    if drawing_layout is None or not words:
+        return result
+    try:
+        tb = drawing_layout.read_title_block(words)
+    except Exception:
+        tb = {}
+    if tb:
+        result["title_block"] = tb
+        pi = result.setdefault("part_info", {})
+        q = tb.get("qty", "")
+        if re.fullmatch(r'\d{1,6}', q.strip()):
+            pi["quantity"] = int(q)
+        pn = tb.get("part") or tb.get("dwg_no")
+        if pn:
+            pi["part_number"] = pn
+        if tb.get("rev"):
+            pi["revision"] = tb["rev"]
+        elif "revision" in pi:
+            # title block has a REV cell and it is empty - drop regex guesses
+            pi.pop("revision", None)
+        if tb.get("title"):
+            pi["title"] = tb["title"]
+        if tb.get("finish"):
+            fin = tb["finish"]
+            result["finishes"] = [{"finish": fin, "context": f"FINISH: {fin}", "source": "title_block"}] + \
+                [f for f in result.get("finishes", []) if f.get("source") != "title_block"
+                 and f.get("finish", "").lower() != fin.lower()]
+        if tb.get("material"):
+            mats = find_materials(tb["material"])
+            for mm in mats:
+                mm["source"] = "title_block"
+            names = {(m.get("name") or m["raw_callout"]).upper() for m in mats}
+            result["materials"] = mats + [m for m in result.get("materials", [])
+                                          if (m.get("name") or m["raw_callout"]).upper() not in names]
+            result["material_callout"] = tb["material"]
+
+    # Stacked limit deviations (e.g. "1.000 F7" with -.001 / -.002 printed beside it)
+    try:
+        stacked = drawing_layout.find_stacked_tolerances(words)
+    except Exception:
+        stacked = []
+    if stacked:
+        tols = result.setdefault("tolerances", [])
+        for st in stacked:
+            devs = [st["upper_in"], st["lower_in"]]
+            if st.get("fit_class"):
+                match = None
+                for t in tols:
+                    if t.get("type") == "fit" and t.get("fit_class", "").upper() == st["fit_class"].upper() \
+                            and abs((t.get("nominal_in") or 0) - st["nominal_in"]) < 1e-4:
+                        match = t
+                        break
+                if match is None:
+                    match = {"value": None, "type": "fit", "nominal_in": st["nominal_in"],
+                             "fit_class": st["fit_class"]}
+                    tols.append(match)
+                match["deviations_in"] = devs
+                match["raw"] = st["raw"]
+                match["source"] = "layout"
+            else:
+                if not any(t.get("raw") == st["raw"] for t in tols):
+                    tols.append({"value": None, "type": "limit", "nominal_in": st["nominal_in"],
+                                 "deviations_in": devs, "band_in": round(st["upper_in"] - st["lower_in"], 4),
+                                 "raw": st["raw"], "source": "layout"})
+    for t in result.get("tolerances", []):
+        if t.get("type") == "fit":
+            _annotate_fit(t)
+    bands = [t["band_in"] for t in result.get("tolerances", []) if t.get("band_in")]
+    if bands:
+        result["tightest_tolerance_in"] = min(bands)
+    return result
+
+
+def _analyze_single_page(page_text, page_num, words=None):
     """Analyze a single page's text and return extracted specs."""
     if len(page_text.strip()) < 10:
         return None  # skip pages with no meaningful text
@@ -1114,6 +1235,9 @@ def _analyze_single_page(page_text, page_num):
         "part_info": find_part_info(page_text),
         "features": find_features(page_text),
     }
+
+    # Coordinate-based enrichment (title block cells, stacked limits, ISO fits)
+    apply_layout(result, words)
 
     # Determine fab type (machined vs sheet metal) and scrub irrelevant fields
     finalize_fab_type(result, page_text)
@@ -1173,10 +1297,20 @@ def analyze_drawing(pdf_path):
             "page_count": len(pages),
         }
 
+    # Word positions for layout-aware parsing (optional; never fatal)
+    page_words = []
+    if drawing_layout is not None and not is_scanned:
+        try:
+            page_words = drawing_layout.get_page_words(pdf_path)
+        except Exception:
+            page_words = []
+
     # 3. Per-page extraction (skip page 1 if it looks like a cover/title page)
     page_results = []
     for pg in pages:
-        page_data = _analyze_single_page(pg["text"], pg["page"])
+        idx = pg["page"] - 1
+        pw = page_words[idx] if idx < len(page_words) else None
+        page_data = _analyze_single_page(pg["text"], pg["page"], pw)
         if page_data is not None:
             # Check if page has meaningful drawing data (not just a title page)
             has_data = (
@@ -1206,6 +1340,19 @@ def analyze_drawing(pdf_path):
         "part_info": find_part_info(full_text),
         "features": find_features(full_text),
     }
+    # Layout enrichment across all pages (title block from the first page that has one)
+    all_words = [w for pw in page_words for w in (pw or [])]
+    if page_words:
+        first_tb_words = next((pw for pw in page_words
+                               if pw and drawing_layout.read_title_block(pw)), page_words[0])
+        apply_layout(overall, first_tb_words)
+        if len(page_words) > 1:
+            # stacked tolerances from the remaining pages
+            extra = {"tolerances": overall["tolerances"]}
+            for pw in page_words:
+                if pw is not first_tb_words:
+                    apply_layout(extra, [w for w in pw])
+            overall["tolerances"] = extra["tolerances"]
     # Determine overall fab type (machined vs sheet metal)
     finalize_fab_type(overall, full_text)
 
