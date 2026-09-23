@@ -417,16 +417,29 @@ def find_fits(text):
         if nominal <= 0 or nominal > 60:
             continue
         cls = m.group(2) + m.group(3)
-        window = text[max(0, m.start() - 25):m.end() + 25]
-        devs = []
+        # Limit deviations are usually printed just above/below the nominal;
+        # text extractors may place them a few lines away, so look in a wider
+        # window and keep the two closest small signed values.
+        w0 = max(0, m.start() - 60)
+        window = text[w0:m.end() + 60]
+        cands = []
         for dm in re.finditer(r'(?<![\w.])([+\-])\s*(\.\d{3,4}|0\.\d{3,4})\b', window):
             try:
                 v = float(dm.group(2)) * (-1 if dm.group(1) == '-' else 1)
-                if v not in devs:
-                    devs.append(v)
             except ValueError:
-                pass
-        devs = devs[:2]
+                continue
+            if abs(v) > 0.05:
+                continue
+            pos = w0 + dm.start()
+            dist = (m.start() - pos) if pos < m.start() else (pos - m.end())
+            cands.append((dist, v))
+        devs = []
+        for _, v in sorted(cands):
+            if v not in devs:
+                devs.append(v)
+            if len(devs) == 2:
+                break
+        devs.sort(reverse=True)
         raw = f"{m.group(1)} {cls}"
         if devs:
             raw += " (" + "/".join(("+" if d >= 0 else "-") + f"{abs(d):.3f}".lstrip("0") for d in devs) + ")"
@@ -680,6 +693,11 @@ def find_finishes(text):
                       "context": m.group(0).strip(), "source": "title_block"})
         break
 
+    # Standalone "Machined" / "As Machined" value (title-block cell on its own line)
+    if not any(f.get("source") == "title_block" for f in found):
+        if re.search(r'^[ \t]*(?:AS[ \t]+)?MACHINED[ \t]*$', text, re.IGNORECASE | re.MULTILINE):
+            found.append({"finish": "Machined", "context": "Machined", "source": "title_block"})
+
     # Deduplicate by finish keyword
     seen = set()
     unique = []
@@ -915,7 +933,7 @@ def classify_drawing(text, thickness, bends, fits):
         add("m", 2, f"part noun '{m.group(1)}'")
     if re.search(r'\b(KEYWAY|KEYSEAT|KEY\s*SEAT|SNAP\s*RING\s*GROOVE|RETAINING\s*RING\s*GROOVE|UNDERCUT|KNURL|CENTER\s*DRILL|TURN(?:ED)?\b|LATHE|GRIND|GROUND)\b', up):
         add("m", 2, "turning/milling feature")
-    if re.search(r'\bFINISH\b\s*[:\-]?\s*MACHINED\b|\bAS\s+MACHINED\b|\bMACHINED\s+FINISH\b', up):
+    if re.search(r'\bFINISH\b\s*[:\-]?\s*MACHINED\b|\bAS\s+MACHINED\b|\bMACHINED\s+FINISH\b|^[ \t]*MACHINED[ \t]*$', up, re.MULTILINE):
         add("m", 2, "finish = machined")
     if re.search(r'\b\d{1,3}\s*(?:RA|RMS|µIN|MICRO\s*IN)\b|√', up):
         add("m", 2, "surface roughness callout")
