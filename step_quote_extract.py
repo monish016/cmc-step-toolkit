@@ -1830,8 +1830,36 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     clusters = cluster_features(candidates)
     slot_features, remaining_clusters = merge_slot_pairs(clusters)
     classified = [classify_cluster(m) for m in remaining_clusters if len(m) > 0]
-    features = slot_features + [c for c in classified if c is not None]
+    features_raw = slot_features + [c for c in classified if c is not None]
     unclassified_count = sum(1 for c in classified if c is None)
+
+    # --- Filter out bend reliefs and edge notches ---
+    # Features whose smallest dimension is <= sheet thickness are almost certainly
+    # bend relief cuts, not actual holes.  Also filter features smaller than a
+    # practical minimum (3mm in any dimension) regardless of thickness.
+    _bend_relief_filtered = 0
+    features = []
+    for f in features_raw:
+        if f["type"] == "square_or_rect":
+            dims_mm = sorted([f["size_in"][0] * 25.4, f["size_in"][1] * 25.4])
+            min_dim_mm = dims_mm[0]
+            # If smaller dimension is <= thickness, it's a bend relief
+            if min_dim_mm <= thickness_mm * 1.2:
+                _bend_relief_filtered += 1
+                continue
+            # Absolute minimum: skip features smaller than 3mm in any dimension
+            if min_dim_mm < 3.0:
+                _bend_relief_filtered += 1
+                continue
+        elif f["type"] == "round":
+            dia_mm = f.get("diameter_in", 0) * 25.4
+            # Round holes smaller than thickness are likely edge blend artifacts
+            if dia_mm <= thickness_mm * 0.8:
+                _bend_relief_filtered += 1
+                continue
+        features.append(f)
+    if _bend_relief_filtered:
+        print(f"[DEBUG] Filtered {_bend_relief_filtered} bend relief / edge notch false positives (thickness={thickness_mm:.2f}mm)", flush=True)
 
     # --- DEBUG: feature pipeline stats ---
     _cyl_cands = [c for c in candidates if c["kind"] == "cyl"]
