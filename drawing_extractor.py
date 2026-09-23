@@ -29,6 +29,8 @@ KNOWN_MATERIALS = {
     "409": {"name": "Stainless Steel 409", "density_gcc": 7.7, "family": "stainless"},
     "430": {"name": "Stainless Steel 430", "density_gcc": 7.7, "family": "stainless"},
     "SUS304": {"name": "Stainless Steel SUS304", "density_gcc": 7.9, "family": "stainless"},
+    "SS304": {"name": "Stainless Steel 304", "density_gcc": 7.9, "family": "stainless"},
+    "SS316": {"name": "Stainless Steel 316", "density_gcc": 8.0, "family": "stainless"},
     # Carbon / mild steels
     "A36": {"name": "ASTM A36 Steel", "density_gcc": 7.85, "family": "carbon"},
     "1018": {"name": "AISI 1018 Steel", "density_gcc": 7.87, "family": "carbon"},
@@ -51,12 +53,22 @@ KNOWN_MATERIALS = {
     "C260": {"name": "Brass C260", "density_gcc": 8.53, "family": "brass"},
 }
 
+# Standard MSG (Manufacturer's Standard Gauge) - used for carbon/mild steel
 GAUGE_TO_INCHES = {
     7: 0.1793, 8: 0.1644, 9: 0.1495, 10: 0.1345, 11: 0.1196,
     12: 0.1046, 13: 0.0897, 14: 0.0747, 15: 0.0673, 16: 0.0598,
     17: 0.0538, 18: 0.0478, 19: 0.0418, 20: 0.0359, 21: 0.0329,
     22: 0.0299, 23: 0.0269, 24: 0.0239, 25: 0.0209, 26: 0.0179,
     27: 0.0164, 28: 0.0149, 29: 0.0135, 30: 0.0120,
+}
+
+# Stainless steel actual nominal thickness (slightly different from MSG)
+GAUGE_TO_INCHES_SS = {
+    7: 0.1875, 8: 0.1719, 9: 0.1563, 10: 0.1406, 11: 0.1250,
+    12: 0.1094, 13: 0.0938, 14: 0.0781, 15: 0.0703, 16: 0.0625,
+    17: 0.0563, 18: 0.0500, 19: 0.0438, 20: 0.0375, 21: 0.0344,
+    22: 0.0313, 23: 0.0281, 24: 0.0250, 25: 0.0219, 26: 0.0188,
+    27: 0.0172, 28: 0.0156, 29: 0.0141, 30: 0.0125,
 }
 
 FINISH_KEYWORDS = [
@@ -95,6 +107,7 @@ def _compile_patterns():
         # Material callouts
         "material_steel": re.compile(
             r'\b(30[14]L?|316L?|40[19]|430|SUS\s*30[14])\b'
+            r'|\b(SS\s*30[14]L?|SS\s*316L?)\b'
             r'|\b(A-?36|ASTM\s*A-?36)\b'
             r'|\b(10[12][\d]|1045)\s*(?:CRS|HRS|STEEL|STL)?\b'
             r'|\b(CRS|HRS|HRPO|CR\s*STEEL|HR\s*STEEL)\b'
@@ -142,7 +155,7 @@ def _compile_patterns():
         ),
         # Bend info
         "bend_radius": re.compile(
-            r'(?:BEND\s*)?R(?:AD(?:IUS)?)?\.?\s*[:=]?\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
+            r'(?:BEND\s*)?R(?:AD(?:IUS)?)?\.?[ \t]*[:=]?[ \t]*(\d*\.?\d+)\s*(?:"|IN|MM)?'
             r'|(?:INSIDE|BEND)\s+(?:RAD(?:IUS)?|R)\s*[:=]?\s*(\d*\.?\d+)',
             re.IGNORECASE
         ),
@@ -294,9 +307,23 @@ def find_materials(text):
     return unique
 
 
-def find_thickness(text):
-    """Extract sheet thickness from drawing."""
+def find_thickness(text, material_family=None):
+    """Extract sheet thickness from drawing.
+
+    Args:
+        text: Drawing text to parse.
+        material_family: If 'stainless', use stainless steel gauge table.
+    """
     results = []
+
+    # Auto-detect stainless from text if not specified
+    if material_family is None:
+        text_upper = text.upper()
+        if any(kw in text_upper for kw in ('STAINLESS', 'SS304', 'SS316', 'SUS304', 'SUS316', '304L', '316L', '304 ', '316 ')):
+            material_family = 'stainless'
+
+    # Pick the right gauge table
+    gauge_table = GAUGE_TO_INCHES_SS if material_family == 'stainless' else GAUGE_TO_INCHES
 
     # Decimal thickness with explicit THK/THICK keyword
     for m in PATTERNS["thickness_decimal"].finditer(text):
@@ -315,11 +342,12 @@ def find_thickness(text):
         if val:
             try:
                 g = int(val)
-                if g in GAUGE_TO_INCHES:
+                if g in gauge_table:
                     results.append({
-                        "value_in": GAUGE_TO_INCHES[g],
+                        "value_in": gauge_table[g],
                         "gauge": g,
-                        "raw": m.group(0).strip()
+                        "raw": m.group(0).strip(),
+                        "gauge_standard": "SS" if material_family == 'stainless' else "MSG"
                     })
             except ValueError:
                 pass
@@ -382,7 +410,50 @@ def find_tolerances(text):
     for m in PATTERNS["tolerance_class"].finditer(text):
         results.append({"value": None, "raw": m.group(0).strip(), "type": "general_note"})
 
-    return results
+    # --- Extract structured tolerance block ---
+    # FRACTIONAL 1/16
+    frac_m = re.search(r'FRACTIONAL\s+(\d+/\d+)', text, re.IGNORECASE)
+    if frac_m:
+        results.append({"value": None, "raw": f"FRACTIONAL {frac_m.group(1)}", "type": "fractional"})
+
+    # ANGULAR: MACH 1° BEND 1°
+    ang_m = re.search(
+        r'ANGULAR\s*:\s*(?:MACH\s*(\d+)\s*[°]?\s*)?(?:BEND\s*(\d+)\s*[°]?)?',
+        text, re.IGNORECASE
+    )
+    if ang_m and (ang_m.group(1) or ang_m.group(2)):
+        parts = []
+        if ang_m.group(1):
+            parts.append(f"MACH {ang_m.group(1)}deg")
+        if ang_m.group(2):
+            parts.append(f"BEND {ang_m.group(2)}deg")
+        results.append({"value": None, "raw": f"ANGULAR: {', '.join(parts)}", "type": "angular"})
+
+    # TWO PLACE DECIMAL .020 / THREE PLACE DECIMAL .005
+    for dec_m in re.finditer(
+        r'((?:ONE|TWO|THREE|FOUR)\s+PLACE\s+DECIMAL)\s+\.?(\d{2,4})',
+        text, re.IGNORECASE
+    ):
+        try:
+            # Always treat captured digits as fractional part (e.g. "020" -> 0.020)
+            val = float('0.' + dec_m.group(2))
+            results.append({
+                "value": val,
+                "raw": f"{dec_m.group(1)} .{dec_m.group(2)}",
+                "type": "decimal_places"
+            })
+        except ValueError:
+            results.append({"value": None, "raw": dec_m.group(0).strip(), "type": "decimal_places"})
+
+    # Deduplicate by raw text
+    seen = set()
+    unique = []
+    for t in results:
+        key = t["raw"].upper().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+    return unique
 
 
 def find_bends(text):
@@ -390,7 +461,22 @@ def find_bends(text):
     radii = []
     angles = []
 
-    for m in PATTERNS["bend_radius"].finditer(text):
+    # --- Strip out tolerance block text to avoid false bend detections ---
+    # Lines like "ANGULAR: MACH 1° BEND 1°" are tolerances, not bends.
+    # Also strip "FRACTIONAL", "DECIMAL" tolerance lines.
+    tol_block_re = re.compile(
+        r'(?:UNLESS\s+OTHERWISE\s+(?:SPECIFIED|NOTED|STATED)[:\s]*'
+        r'|ANGULAR\s*:\s*.*'
+        r'|FRACTIONAL\s+\d.*'
+        r'|(?:TWO|THREE|ONE|FOUR)\s+PLACE\s+DECIMAL.*'
+        r'|TOLERANCES?\s*:\s*.*'
+        r'|INTERPRET\s+GEOMETRIC.*'
+        r'|DIMENSIONS\s+ARE\s+IN\s+.*)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    clean_text = tol_block_re.sub('', text)
+
+    for m in PATTERNS["bend_radius"].finditer(clean_text):
         val = m.group(1) or m.group(2)
         if val:
             try:
@@ -400,12 +486,15 @@ def find_bends(text):
             except ValueError:
                 pass
 
-    for m in PATTERNS["bend_angle"].finditer(text):
+    for m in PATTERNS["bend_angle"].finditer(clean_text):
         val = m.group(1) or m.group(2)
         if val:
             try:
                 a = float(val)
-                if 1 <= a <= 180:
+                # Skip very small angles (likely tolerance specs that slipped through)
+                if a < 5:
+                    continue
+                if 5 <= a <= 180:
                     angles.append({"value_deg": a, "raw": m.group(0).strip()})
             except ValueError:
                 pass
@@ -417,12 +506,51 @@ def find_dimensions(text):
     """Extract overall dimensions from drawing."""
     dims = []
 
+    # Diameter symbol variants
+    DIA = r'[∅Ø⌀]'
+
     # LxW or LxWxH patterns
     for m in PATTERNS["dimensions"].finditer(text):
+        raw = m.group(0).strip()
+        match_start = m.start()
+        match_end = m.end()
+
+        # --- Filter out hole callouts and thread specs disguised as dimensions ---
+        # Check if this NxD match is actually a feature callout (e.g. "30 x ∅ 0.17 THRU ALL")
+        # or a metric thread spec (e.g. "M5x0.8")
+        before_ctx = text[max(0, match_start - 5):match_start]
+        after_ctx = text[match_end:match_end + 30]
+
+        # Skip metric thread specs like M5x0.8, M10x1.5
+        if re.search(r'M\d*$', before_ctx):
+            continue
+
+        # Skip if followed by THRU, DP, DEEP (hole depth qualifier)
+        if re.match(r'\s*(?:THRU|DP|DEEP)\b', after_ctx, re.IGNORECASE):
+            continue
+        # Skip if a diameter symbol appears between the two numbers
+        between = text[m.start():m.end()]
+        if re.search(DIA, between):
+            continue
+        # Skip if diameter symbol appears right before the second number
+        # e.g. "30 x ∅ 0.17" — the ∅ may be between "x" and the number
+        gap_text = text[m.start():m.end()]
+        x_pos = re.search(r'[xX×]', gap_text)
+        if x_pos:
+            after_x = gap_text[x_pos.end():]
+            if re.match(r'\s*' + DIA, after_x):
+                continue
+        # Also check the broader context: if the full line looks like "N x ∅ D THRU"
+        line_start = text.rfind('\n', max(0, match_start - 80), match_start)
+        line_end = text.find('\n', match_end, match_end + 80)
+        full_line = text[line_start + 1 if line_start >= 0 else 0 : line_end if line_end >= 0 else match_end + 80]
+        if re.search(DIA + r'\s*\d', full_line) and re.search(r'THRU', full_line, re.IGNORECASE):
+            continue
+
         d = {"length": float(m.group(1)), "width": float(m.group(2))}
         if m.group(3):
             d["height"] = float(m.group(3))
-        d["raw"] = m.group(0).strip()
+        d["raw"] = raw
         # Filter out obviously wrong matches (too small or too large)
         if 0.01 <= d["length"] <= 500 and 0.01 <= d["width"] <= 500:
             dims.append(d)
@@ -513,7 +641,18 @@ def find_features(text):
             continue
         if dia < 0.01 or dia > 10.0:
             continue
-        count = int(m.group(1)) if m.group(1) else 1
+        # Allow count even across newlines for round holes (PDF text extraction
+        # often breaks annotations across lines). Only reject if there's substantial
+        # unrelated text between count and diameter.
+        count = 1
+        if m.group(1):
+            count_end = m.start(1) + len(m.group(1))
+            dia_start = m.start(2)
+            between = text[count_end:dia_start]
+            # Allow if between is only whitespace, newlines, and diameter symbols
+            between_clean = re.sub(r'[\s∅Ø⌀xX×]', '', between)
+            if len(between_clean) == 0:
+                count = int(m.group(1))
         is_thru = 'THRU' in (m.group(3) or '').upper()
 
         feat = {
@@ -579,7 +718,14 @@ def find_features(text):
                 num_size, tpi = int(nm.group(1)), int(nm.group(2))
                 if num_size > 14 or tpi < 4 or tpi > 100:
                     continue
-        elif not thread.upper().startswith('M'):
+        elif thread.upper().startswith('M'):
+            # Metric thread: validate reasonable size (M1 through M100)
+            mm = re.match(r'M(\d+)', thread)
+            if mm:
+                metric_size = int(mm.group(1))
+                if metric_size > 100 or metric_size < 1:
+                    continue
+        else:
             # Plain digit-dash-digit without # or M: skip (too ambiguous -- matches part numbers, dates)
             continue
 
@@ -588,7 +734,19 @@ def find_features(text):
         if not thread.startswith('#') and not thread.upper().startswith('M') and not qualifier.strip():
             continue
 
-        count = int(m.group(1)) if m.group(1) else 1
+        # Validate count: if count prefix and thread spec are on different lines, skip
+        # (prevents "30 x\n∅ 0.17" bleeding count into "M5x0.8" on the next line)
+        count = 1
+        if m.group(1):
+            # Check if the count and thread are on the same line
+            count_end = m.start(1) + len(m.group(1))
+            thread_start = m.start(2)
+            between = text[count_end:thread_start]
+            if '\n' in between:
+                # Count and thread on different lines — ignore the count
+                count = 1
+            else:
+                count = int(m.group(1))
         depth_str = m.group(4) or ''
 
         feat = {
@@ -678,10 +836,18 @@ def _analyze_single_page(page_text, page_num):
     if len(page_text.strip()) < 10:
         return None  # skip pages with no meaningful text
 
+    materials = find_materials(page_text)
+    # Detect material family for gauge table selection
+    mat_family = None
+    for mat in materials:
+        if mat.get('family') == 'stainless':
+            mat_family = 'stainless'
+            break
+
     result = {
         "page": page_num,
-        "materials": find_materials(page_text),
-        "thickness": find_thickness(page_text),
+        "materials": materials,
+        "thickness": find_thickness(page_text, material_family=mat_family),
         "dimensions": find_dimensions(page_text),
         "tolerances": find_tolerances(page_text),
         "bends": find_bends(page_text),
@@ -782,9 +948,16 @@ def analyze_drawing(pdf_path):
                 page_results.append(page_data)
 
     # 4. Also run full-document extraction for overall summary
+    all_materials = find_materials(full_text)
+    overall_mat_family = None
+    for mat in all_materials:
+        if mat.get('family') == 'stainless':
+            overall_mat_family = 'stainless'
+            break
+
     overall = {
-        "materials": find_materials(full_text),
-        "thickness": find_thickness(full_text),
+        "materials": all_materials,
+        "thickness": find_thickness(full_text, material_family=overall_mat_family),
         "dimensions": find_dimensions(full_text),
         "tolerances": find_tolerances(full_text),
         "bends": find_bends(full_text),
