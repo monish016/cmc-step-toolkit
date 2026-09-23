@@ -163,14 +163,16 @@
     "od": 1.9,
     "len": 49.75,
     "tight": 0.001,
-    "part_h": "67e6373eecbd2f25"
+    "part_h": "67e6373eecbd2f25",
+    "priced": true,
+    "units": "in"
    }
   },
   "7d511e5613c601e5d0d833ee964367b1d0a01648971c8e0746038d30a95c16d7": {
    "label": "PDF-02 12GA SS panel (Shane test PDF 1)",
    "kind": "drawing",
    "status": "verified",
-   "note": "Shane: 12GA SS = .1094, no false 30x0.17 dimension, no 1-degree bends, no M150 tap. Drawing shows 5 bends but only 4 are called out.",
+   "note": "Shane: 12GA SS = .1094, no false 30x0.17 dimension, no 1-degree bends, no M150 tap. Drawing shows 5 bends but only 4 are called out. Flat pattern 46.03 x 43.83 read from the flat view.",
    "checks": {
     "fab": "sheet_metal",
     "thk": 0.1094,
@@ -180,7 +182,11 @@
     "tapped": 1,
     "fits": [],
     "mat": "12 GAGE SHEET, SS304",
-    "part_h": "327d50ce680b63d7"
+    "part_h": "327d50ce680b63d7",
+    "flat_l": 46.03,
+    "flat_w": 43.83,
+    "priced": true,
+    "units": "in"
    }
   },
   "c0cde38f1ea7e35ab8f0676175f56811cba1365db435c04844178e4e282ee115": {
@@ -195,7 +201,9 @@
     "mat": "T303/304 SS",
     "finish0": "63 RMS",
     "holes": 7,
-    "part_h": "a557d3fb09de21ea"
+    "part_h": "a557d3fb09de21ea",
+    "priced": true,
+    "units": "in"
    }
   },
   "de44c519acf4ddbf5167674dfa0d0e9911d51e5e18a6aa07b4d15a94520ff9cd": {
@@ -217,7 +225,41 @@
     "pages": 25,
     "thk": 0.0591,
     "holes": 64,
-    "tapped": 21
+    "tapped": 21,
+    "units": "mm",
+    "priced": false
+   }
+  },
+  "15233d998100f3966fb2a42f22897ba0b5042557ac10832775bfa206cd017df3": {
+   "label": "DXF-01 synthetic 20x10 14GA flat pattern",
+   "kind": "drawing",
+   "status": "verified",
+   "note": "Hand-built DXF: 20x10 outline, 4x .25 + 1x .5 holes, R1 notch, 1 bend line. Cut length 67.85 exact.",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.0781,
+    "holes": 5,
+    "bends": 1,
+    "cut": 67.85,
+    "flat_l": 20,
+    "flat_w": 10,
+    "priced": true,
+    "units": "in"
+   }
+  },
+  "c59661e6d5adea8c1e2dc3a015ed50e10a6c14242fb4b52451609c35ca071dc2": {
+   "label": "DXF-02 same part as a rotated block INSERT",
+   "kind": "drawing",
+   "status": "verified",
+   "note": "Geometry inside a BLOCK, inserted at (100,50) rotated 90 deg - must match DXF-01.",
+   "checks": {
+    "fab": "sheet_metal",
+    "holes": 5,
+    "bends": 1,
+    "cut": 67.85,
+    "flat_l": 20,
+    "flat_w": 10,
+    "priced": true
    }
   }
  }

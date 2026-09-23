@@ -333,6 +333,7 @@ DEFAULT_CONFIG = {
         "brake_adira_length": 157,
         "brake_guifil_length": 120,
         "st30_x": 12.5, "st30_z": 26.0,
+        "tl2_x": 16.0, "tl2_z": 48.0,   # Haas TL-2: max cutting dia / length
         "tm2p_x": 16.0, "tm2p_y": 12.0, "tm2p_z": 16.0,
     },
 
@@ -421,6 +422,29 @@ def _tolerance_factor(band_in, config=None):
     except Exception:
         pass
     return 1.0
+
+
+def _turning_machine(dims, config=None):
+    """Pick the lathe for a turned part: ST-30 if it fits, else TL-2.
+
+    Returns (op_key, op_name, setup_multiplier, warnings).
+    """
+    cap = _cfg(config, "machine_capacity")
+    vals = sorted([dims.get("length", 0) or 0, dims.get("width", 0) or 0, dims.get("height", 0) or 0])
+    length, dia = vals[2], vals[1]
+    st_x, st_z = cap.get("st30_x", 12.5), cap.get("st30_z", 26.0)
+    tl_x, tl_z = cap.get("tl2_x", 16.0), cap.get("tl2_z", 48.0)
+    if length <= st_z and dia <= st_x:
+        return "st30_turning", "CNC Turning (Haas ST-30)", 1.0, []
+    warns = []
+    if length <= tl_z and dia <= tl_x:
+        warns.append(f"Routed to TL-2: {length:.2f}\" x {dia:.2f}\" dia exceeds ST-30 "
+                     f"({st_z}\" Z / {st_x}\" dia)")
+        return "tl2_turning", "CNC Turning (Haas TL-2)", 1.0, warns
+    warns.append(f"Part {length:.2f}\" long x {dia:.2f}\" dia exceeds both lathes "
+                 f"(ST-30 {st_z}\", TL-2 {tl_z}\" max length) - priced on TL-2 with 2 setups "
+                 f"(end-for-end); confirm with shop or quote outside")
+    return "tl2_turning", "CNC Turning (Haas TL-2, end-for-end)", 2.0, warns
 
 
 def _machined_route(geometry, dims, config=None):
@@ -992,6 +1016,10 @@ def estimate_cost(geometry, material_str, quantity=1, config=None):
         op_key, mrr_key = _machined_route(geometry, dims, C)
         op_name = "CNC Turning (Haas ST-30)" if op_key == "st30_turning" else "CNC Milling (Haas TM-2P)"
         mrr = _cfg(C, mrr_key).get(material, 1.8 if op_key == "st30_turning" else 0.8)
+        setup_mult = 1.0
+        if op_key == "st30_turning":
+            op_key, op_name, setup_mult, lathe_warns = _turning_machine(dims, C)
+            warnings.extend(lathe_warns)
 
         if volume_removed > 0 and mrr > 0:
             cycle = (volume_removed / mrr) / 60.0
@@ -1006,20 +1034,8 @@ def estimate_cost(geometry, material_str, quantity=1, config=None):
             warnings.append(f"Tight tolerance band {tol_band}\" - turning cycle x{tol_factor:.2f}"
                             + (" (grinding may be required)" if tol_band <= 0.0005 else ""))
 
-        # Lathe capacity (ST-30 travel)
-        if op_key == "st30_turning":
-            cap = _cfg(C, "machine_capacity")
-            part_len = max(dims.get("length", 0), dims.get("width", 0), dims.get("height", 0))
-            part_dia = sorted([dims.get("length", 0), dims.get("width", 0), dims.get("height", 0)])[1]
-            if part_len > cap.get("st30_z", 26.0):
-                warnings.append(f"Part length {part_len:.2f}\" exceeds ST-30 Z travel "
-                                f"({cap.get('st30_z', 26.0)}\") - route to TL-2 / verify with shop")
-            if part_dia > cap.get("st30_x", 12.5):
-                warnings.append(f"Diameter {part_dia:.2f}\" exceeds ST-30 capacity ({cap.get('st30_x', 12.5)}\")")
-        for note in geometry.get("cost_assumptions", []) or []:
-            warnings.append("Assumption: " + note)
 
-        setup = setup_times.get(op_key, 0.65)
+        setup = setup_times.get(op_key, 0.65) * setup_mult
         rate = rates.get(op_key, 150.0)
         run_time = cycle / ramp * quantity
         total_time = setup + run_time
@@ -1076,6 +1092,9 @@ def estimate_cost(geometry, material_str, quantity=1, config=None):
             "rate_per_hr": weld_rate,
             "total_cost": round(weld_cost, 2),
         })
+
+    for note in geometry.get("cost_assumptions", []) or []:
+        warnings.append("Assumption: " + note)
 
     # ── Material Cost ──────────────────────────────────────────
     mat_costs = _cfg(C, "material_cost_per_lb")
@@ -1286,11 +1305,14 @@ def estimate_cost_simple(geometry, material_str, quantity=1, config=None):
         volume = geometry.get("volume_in3", 0.0) or 0.0
         op_key, mrr_key = _machined_route(geometry, dims, C)
         mrr = _cfg(C, mrr_key).get(material, 1.8 if op_key == "st30_turning" else 0.8)
+        setup_mult = 1.0
+        if op_key == "st30_turning":
+            op_key, _nm, setup_mult, _w = _turning_machine(dims, C)
 
         cycle = max((volume / mrr / 60.0), 0.25) if volume > 0 and mrr > 0 else 0.25
         cycle *= _tolerance_factor(geometry.get("tightest_tolerance_in"), C)
         run = cycle / ramp * quantity
-        t = setup_times.get(op_key, 0.65) + run
+        t = setup_times.get(op_key, 0.65) * setup_mult + run
         total_time += t
         total_cost += t * rates.get(op_key, 150.0)
 

@@ -473,3 +473,67 @@ def _fmt(v):
     while len(s.split(".")[1]) < 3:
         s += "0"
     return ("+" if v >= 0 else "-") + s
+
+
+# ── Part envelope / flat size estimate ─────────────────────────────────
+
+_DIM_NUM = re.compile(r'^\d{1,4}[.,]\d{1,3}$')
+_FLAT_VIEW_RE = re.compile(r'\b(?:UP|DOWN|DN)\s*\d{1,3}\s*°|\bFLAT\s+PATTERN\b|\bBEND\s+LINE', re.IGNORECASE)
+
+
+def estimate_envelope(words, text="", units="in"):
+    """Estimate the part's two largest overall dimensions from dimension text.
+
+    Returns {"length_in", "width_in", "is_flat_view", "candidates_in"} or {}.
+    Dimension text is the largest numeric text on a CAD drawing; title-block and
+    tolerance-table numbers are printed much smaller and are ignored, as are
+    hole/radius callouts and signed limit deviations.
+    """
+    if not words:
+        return {}
+    nums = []
+    for w in words:
+        t = w["text"].strip()
+        if not _DIM_NUM.match(t):
+            continue
+        nums.append(w)
+    if not nums:
+        return {}
+    max_size = max(w["size"] for w in nums)
+    cands = []
+    for w in nums:
+        if w["size"] < 0.7 * max_size:
+            continue
+        # skip hole/radius callouts: a diameter/radius symbol or THRU right beside it
+        skip = False
+        for c in words:
+            if c is w or c["upright"] != w["upright"]:
+                continue
+            ct = c["text"].strip().upper()
+            if w["upright"] and _same_row(c, w):
+                gap_l = w["x0"] - c["x1"]
+                gap_r = c["x0"] - w["x1"]
+                if 0 <= gap_l <= 1.5 * _h(w) and ct in ("Ø", "∅", "⌀", "R", "X", "X∅", "XØ"):
+                    skip = True
+                if 0 <= gap_r <= 1.5 * _h(w) and ct.startswith(("THRU", "DP", "DEEP", "X")):
+                    skip = True
+            if skip:
+                break
+        if skip:
+            continue
+        v = float(w["text"].replace(",", "."))
+        if units == "mm":
+            v = v / 25.4
+        if 0.25 <= v <= 160:
+            cands.append(round(v, 3))
+    if not cands:
+        return {}
+    uniq = sorted(set(cands), reverse=True)
+    length = uniq[0]
+    width = next((u for u in uniq[1:] if u < length - 0.05), None)
+    return {
+        "length_in": length,
+        "width_in": width,
+        "is_flat_view": bool(_FLAT_VIEW_RE.search(text or "")),
+        "candidates_in": uniq[:6],
+    }

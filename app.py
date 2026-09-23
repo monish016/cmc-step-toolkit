@@ -10,6 +10,7 @@ import os
 import uuid
 import json
 import math
+import re
 import shutil
 import subprocess
 import time
@@ -112,14 +113,26 @@ def _init_config_db():
     conn.close()
 
 
+def _merge_defaults(cfg, defaults):
+    """Add keys that exist in defaults but not in a saved config (recursively)."""
+    if not isinstance(cfg, dict) or not isinstance(defaults, dict):
+        return cfg
+    for k, v in defaults.items():
+        if k not in cfg:
+            cfg[k] = v
+        elif isinstance(v, dict) and isinstance(cfg[k], dict):
+            _merge_defaults(cfg[k], v)
+    return cfg
+
+
 def _get_config():
-    """Return the saved shop config dict, or DEFAULT_CONFIG if none saved."""
+    """Return the saved shop config dict (with any new default keys), or the defaults."""
     conn = _get_db()
     row = conn.execute("SELECT config_json FROM shop_config WHERE id = 1").fetchone()
     conn.close()
     if row:
         try:
-            return json.loads(row["config_json"])
+            return _merge_defaults(json.loads(row["config_json"]), cost_engine.get_default_config())
         except (json.JSONDecodeError, TypeError):
             pass
     return cost_engine.get_default_config()
@@ -165,23 +178,51 @@ _DENSITY_LB_IN3 = {"stainless": 0.289, "carbon": 0.284, "aluminum": 0.098,
                    "copper": 0.323, "brass": 0.307, "galvanized": 0.284}
 
 
-def _build_drawing_cost_geometry(drawing_data):
+_FAMILY_TO_MATERIAL = {"stainless": "Stainless Steel", "aluminum": "Aluminum 6061", "copper": "Copper",
+                       "brass": "Brass", "galvanized": "Galvanized Steel", "carbon": "Mild/Carbon Steel",
+                       "steel": "Mild/Carbon Steel"}
+
+
+def _drawing_family(drawing_data):
+    for m in drawing_data.get("materials", []) or []:
+        if m.get("family"):
+            return m["family"]
+    return None
+
+
+def _drawing_material_name(drawing_data, fallback=None):
+    fam = _drawing_family(drawing_data)
+    if fam in _FAMILY_TO_MATERIAL:
+        return _FAMILY_TO_MATERIAL[fam]
+    return fallback or "Mild/Carbon Steel"
+
+
+def _density_for(material_name):
+    m = (material_name or "").lower()
+    if "stainless" in m:
+        return 0.289
+    if "alum" in m:
+        return 0.098
+    if "copper" in m:
+        return 0.323
+    if "brass" in m:
+        return 0.307
+    return 0.284
+
+
+def _build_drawing_cost_geometry(drawing_data, overrides=None, fallback_material=None):
     """Cost-engine input for a machined (turned) part read from a PDF drawing.
 
     Returns (geometry, material_name) or (None, None) when there isn't enough data.
     """
+    ov = overrides or {}
     st = drawing_data.get("machined_stock") or {}
-    od, length = st.get("od_in"), st.get("overall_length_in")
+    od = _f(ov.get("od_in")) or st.get("od_in")
+    length = _f(ov.get("length_in")) or st.get("overall_length_in")
     if not od or not length:
         return None, None
-    fam = None
-    for m in drawing_data.get("materials", []) or []:
-        fam = m.get("family") or fam
-        if fam:
-            break
-    material_name = {"stainless": "Stainless Steel", "aluminum": "Aluminum 6061", "copper": "Copper",
-                     "brass": "Brass", "galvanized": "Galvanized Steel"}.get(fam, "Mild/Carbon Steel")
-    dens = _DENSITY_LB_IN3.get(fam, 0.284)
+    material_name = _drawing_material_name(drawing_data, fallback_material)
+    dens = _density_for(material_name)
 
     cleanup = 0.0625                           # min stock over finished OD
     bar = next((b for b in _BAR_SIZES if b >= od + cleanup - 1e-9), round(od + 0.25, 3))
@@ -204,6 +245,8 @@ def _build_drawing_cost_geometry(drawing_data):
     assumptions = [f'Bar stock {bar:.4g}" dia x {stock_len:.2f}" (next standard size over {od}" OD + cleanup)']
     if step_notes:
         assumptions.append("Turned-down steps estimated at 1.5 x diameter: " + "; ".join(step_notes))
+    if ov:
+        assumptions.append("Sizes adjusted by estimator")
     geo = {
         "fab_type": "machined",
         "turning_hint": True,
@@ -213,8 +256,193 @@ def _build_drawing_cost_geometry(drawing_data):
         "tightest_tolerance_in": drawing_data.get("tightest_tolerance_in"),
         "cost_assumptions": assumptions,
         "bar_stock_in": bar,
+        "_inputs": {"od_in": od, "length_in": length},
     }
     return geo, material_name
+
+
+def _f(v):
+    try:
+        v = float(v)
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _tap_size_class(thread_spec):
+    t = (thread_spec or "").upper().replace(" ", "")
+    m = re.match(r'M(\d+(?:\.\d+)?)', t)
+    if m:
+        d = float(m.group(1)) / 25.4
+    else:
+        m = re.match(r'#(\d+)', t)
+        if m:
+            d = 0.060 + 0.013 * int(m.group(1))
+        else:
+            m = re.match(r'(\d+)/(\d+)', t)
+            d = int(m.group(1)) / int(m.group(2)) if m else 0.25
+    return "small" if d < 0.15 else ("medium" if d < 0.35 else "large")
+
+
+def _build_drawing_sheet_cost_geometry(drawing_data, overrides=None, fallback_material=None):
+    """Cost-engine input for a sheet-metal part read from a PDF drawing.
+
+    Returns (geometry, material_name, reason) - geometry is None with a reason
+    when the drawing doesn't give enough to price (no thickness).
+    """
+    ov = overrides or {}
+    cf = drawing_data.get("_computed_flat") or {}
+    thk = _f(ov.get("thickness_in")) or (cf.get("thickness_in") if cf.get("thickness_found") else None)
+    if not thk:
+        return None, None, "No sheet thickness or gauge on the drawing - enter a thickness to price it."
+    flat_w = _f(ov.get("flat_width_in")) or cf.get("flat_width_in")
+    flat_l = _f(ov.get("flat_length_in")) or cf.get("flat_length_in")
+    if not flat_w or not flat_l:
+        return None, None, "Flat size unknown - enter the flat width and length to price it."
+    bends = ov.get("bends")
+    try:
+        bends = int(bends) if bends not in (None, "") else int(cf.get("num_bends") or 0)
+    except (TypeError, ValueError):
+        bends = int(cf.get("num_bends") or 0)
+
+    material_name = _drawing_material_name(drawing_data, fallback_material)
+    dens = _density_for(material_name)
+
+    hole_count = tap_count = 0
+    hole_perim = 0.0
+    tap_classes = []
+    feats = []
+    for f in drawing_data.get("features") or []:
+        n = int(f.get("count", 1) or 1)
+        if f.get("type") in ("round_hole", "counterbored_hole", "countersunk_hole"):
+            d = f.get("diameter_in") or 0
+            hole_count += n
+            hole_perim += math.pi * d * n
+            feats.extend({"type": "round", "diameter_in": d} for _ in range(min(n, 500)))
+        elif f.get("type") == "tapped_hole":
+            tap_count += n
+            hole_count += n
+            tap_classes.extend([_tap_size_class(f.get("thread_spec"))] * n)
+            hole_perim += math.pi * 0.2 * n
+        elif f.get("type") == "slot":
+            w, l = f.get("width_in") or 0, f.get("length_in") or 0
+            hole_perim += (2 * max(l - w, 0) + math.pi * w) * n
+    dxf_cut = drawing_data.get("dxf_cut_length_in")
+    if dxf_cut and not (ov.get("flat_width_in") or ov.get("flat_length_in")):
+        cut_perim = float(dxf_cut)        # exact, measured from the DXF geometry
+    else:
+        cut_perim = 2 * (flat_w + flat_l) + hole_perim
+    weight = flat_w * flat_l * thk * dens
+    thick_list = drawing_data.get("thickness") or []
+    gauge = thick_list[0].get("gauge") if thick_list else None
+
+    src = cf.get("size_source")
+    notes = []
+    if ov.get("flat_width_in") or ov.get("flat_length_in"):
+        notes.append(f'Flat size {flat_l}" x {flat_w}" entered by estimator')
+    elif src == "flat_view" and drawing_data.get("dxf_cut_length_in"):
+        notes.append(f'Flat size {flat_l}" x {flat_w}" measured from the DXF profile')
+    elif src == "flat_view":
+        notes.append(f'Flat size {flat_l}" x {flat_w}" read from the flat-pattern dimensions')
+    elif src == "formed_envelope":
+        notes.append(f'Flat size {flat_l}" x {flat_w}" from formed-view dimensions (+ bend allowance for called-out bends) - verify')
+    elif src == "dimension_callout":
+        notes.append(f'Flat size {flat_l}" x {flat_w}" from an L x W callout - verify')
+    else:
+        notes.append("Flat size not found on drawing - default used, enter the real flat size")
+    if dxf_cut and not (ov.get("flat_width_in") or ov.get("flat_length_in")):
+        notes.append(f'Cut length {dxf_cut}" measured from the DXF geometry (all profiles and holes)')
+    else:
+        notes.append("Cut length = flat outline + called-out holes; cutouts without a callout are not included")
+    if bends and not ov.get("bends"):
+        notes.append(f"{bends} bend(s) from the drawing (bend callouts / DXF bend lines) - verify against the views")
+
+    geo = {
+        "fab_type": "Sheet Metal",
+        "thickness_in": thk,
+        "dims": {"length": flat_l, "width": flat_w, "height": thk},
+        "bend_count": bends,
+        "cut_perimeter_in": round(cut_perim, 2),
+        "flat_width_in": flat_w,
+        "flat_length_in": flat_l,
+        "weight_lb": round(weight, 3),
+        "hole_count": hole_count,
+        "tap_count": tap_count,
+        "tap_size_class": max(set(tap_classes), key=tap_classes.count) if tap_classes else "medium",
+        "csink_count": 0,
+        "hardware_count": 0,
+        "gauge_num": gauge,
+        "features_list": feats,
+        "cost_assumptions": notes,
+        "_inputs": {"flat_width_in": flat_w, "flat_length_in": flat_l, "thickness_in": thk, "bends": bends},
+    }
+    return geo, material_name, None
+
+
+def _drawing_cost(drawing_data, quantity, overrides=None, fallback_material=None):
+    """Price a drawing. Returns (cost_estimate or None, cost_geo or None, message)."""
+    fab = drawing_data.get("likely_fab_type")
+    if (drawing_data.get("drawing_page_count") or 1) > 1 and not overrides:
+        return None, None, "Multi-part drawing package - price each part from its own drawing."
+    if fab == "machined":
+        geo, mat = _build_drawing_cost_geometry(drawing_data, overrides, fallback_material)
+        if not geo:
+            return None, None, "Stock size (OD x length) not found - enter it to price the part."
+    elif fab == "sheet_metal":
+        geo, mat, msg = _build_drawing_sheet_cost_geometry(drawing_data, overrides, fallback_material)
+        if not geo:
+            return None, None, msg
+    else:
+        return None, None, "Part type unclear from the drawing - can't price automatically."
+    est = cost_engine.estimate_cost(geo, mat, quantity, config=_get_config())
+    est["inputs"] = geo.get("_inputs", {})
+    if geo.get("bar_stock_in"):
+        est["bar_stock_in"] = geo["bar_stock_in"]
+    return est, geo, None
+
+
+def _drawing_quote_geometry(drawing_data, cost_geo):
+    """Shape drawing data like STEP geometry so the customer quote PDF can render it."""
+    fab = drawing_data.get("likely_fab_type")
+    pi = drawing_data.get("part_info") or {}
+    thick_list = drawing_data.get("thickness") or []
+    feats = []
+    for f in drawing_data.get("features") or []:
+        n = int(f.get("count", 1) or 1)
+        t = "slot" if f.get("type") == "slot" else "round"
+        feats.extend({"type": t} for _ in range(min(n, 500)))
+    extra = []
+    if pi.get("part_number"):
+        extra.append(["Drawing No.", pi["part_number"] + (f' Rev {pi["revision"]}' if pi.get("revision") else "")])
+    if pi.get("title"):
+        extra.append(["Description", pi["title"]])
+    if drawing_data.get("material_callout"):
+        extra.append(["Material (drawing)", drawing_data["material_callout"]])
+    fins = [f.get("finish") for f in drawing_data.get("finishes") or [] if f.get("finish")]
+    if fins:
+        extra.append(["Finish", ", ".join(fins)])
+    if drawing_data.get("tightest_tolerance_in"):
+        extra.append(["Tightest Tolerance", f'{drawing_data["tightest_tolerance_in"]}"'])
+    geo = {
+        "fab_type": "machined" if fab == "machined" else "sheet_metal",
+        "envelope": {"mass_lb": (cost_geo or {}).get("weight_lb", 0)},
+        "features": feats,
+        "quote_extra_rows": extra,
+        "source": "drawing",
+    }
+    if fab == "machined":
+        inp = (cost_geo or {}).get("_inputs", {})
+        extra.insert(0, ["Raw Stock", f'Round bar {cost_geo.get("bar_stock_in")}" dia for '
+                                      f'{inp.get("od_in")}" OD x {inp.get("length_in")}" long'])
+    else:
+        inp = (cost_geo or {}).get("_inputs", {})
+        geo["thickness_in"] = inp.get("thickness_in")
+        geo["gauge"] = thick_list[0].get("gauge") if thick_list else None
+        geo["num_bends"] = inp.get("bends", 0)
+        geo["bend_angles_deg"] = [int(a) for a in ((drawing_data.get("_computed_flat") or {}).get("bend_angles") or [])]
+        geo["flat_width_in"] = inp.get("flat_width_in")
+        geo["flat_length_in"] = inp.get("flat_length_in")
+    return geo
 
 
 def _build_cost_geometry(geometry):
@@ -742,7 +970,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-<div class="footer">Chicago Metalcraft Quoting Toolkit v4.0 &middot; <a href="/regression" style="color:#888">Regression tests</a></div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v4.1 &middot; <a href="/regression" style="color:#888">Regression tests</a></div>
 
 <script>
 // --- Utility ---
@@ -1285,6 +1513,73 @@ function renderCostEstimate(cost) {
   return html;
 }
 
+function drawingField(idx, key, label, val) {
+  var v = (val === undefined || val === null) ? '' : val;
+  return '<label style="display:inline-block;margin:0 10px 6px 0;font-size:0.8rem;color:#444">' + label +
+    '<br><input type="number" step="any" id="dov-' + idx + '-' + key + '" value="' + v + '" style="width:110px;padding:4px"></label>';
+}
+
+function renderDrawingPricing(r, idx) {
+  var d = r.drawing_data || {};
+  var fab = d.likely_fab_type;
+  if (fab !== 'machined' && fab !== 'sheet_metal') return '';
+  var cf = d._computed_flat || {};
+  var st = d.machined_stock || {};
+  var inp = (r.cost_estimate && r.cost_estimate.inputs) || {};
+  var h = '<div id="dcost-' + idx + '">';
+  if (r.cost_estimate) {
+    h += renderCostEstimate(r.cost_estimate);
+  } else if (d.cost_message) {
+    h += '<div style="background:#fff8e1;border:1px solid #f0d58a;border-radius:6px;padding:0.6rem;margin:0.8rem 0;font-size:0.85rem">' + d.cost_message + '</div>';
+  }
+  h += '</div>';
+  h += '<div style="border:1px solid #d8e8d8;background:#f7fbf7;border-radius:6px;padding:0.7rem;margin:0.8rem 0">';
+  h += '<div style="font-weight:600;color:#1a3a1a;font-size:0.9rem;margin-bottom:0.4rem">Check sizes &amp; re-price</div>';
+  if (fab === 'machined') {
+    h += drawingField(idx, 'od_in', 'Finished OD (in)', inp.od_in || st.od_in);
+    h += drawingField(idx, 'length_in', 'Overall length (in)', inp.length_in || st.overall_length_in);
+  } else {
+    h += drawingField(idx, 'flat_length_in', 'Flat length (in)', inp.flat_length_in || cf.flat_length_in);
+    h += drawingField(idx, 'flat_width_in', 'Flat width (in)', inp.flat_width_in || cf.flat_width_in);
+    h += drawingField(idx, 'thickness_in', 'Thickness (in)', inp.thickness_in || (cf.thickness_found ? cf.thickness_in : ''));
+    h += drawingField(idx, 'bends', 'Bends', (inp.bends !== undefined) ? inp.bends : (cf.num_bends || 0));
+  }
+  h += '<div><button class="dl-btn secondary" onclick="repriceDrawing(' + idx + ')">Re-price</button> ';
+  h += '<button class="dl-btn" onclick="downloadQuotePDF(' + idx + ')">Download Quote PDF</button>';
+  h += '<span id="dcost-msg-' + idx + '" style="margin-left:8px;font-size:0.8rem;color:#b00020"></span></div>';
+  h += '</div>';
+  return h;
+}
+
+async function repriceDrawing(idx) {
+  var r = _allResults[idx];
+  if (!r || !r.job_id) return;
+  var keys = ['od_in', 'length_in', 'flat_length_in', 'flat_width_in', 'thickness_in', 'bends'];
+  var ov = {};
+  keys.forEach(function(k) {
+    var el = document.getElementById('dov-' + idx + '-' + k);
+    if (el && el.value !== '') ov[k] = parseFloat(el.value);
+  });
+  var qel = document.getElementById('quantity');
+  var qty = parseInt((qel && qel.value) || '1', 10) || 1;
+  var msg = document.getElementById('dcost-msg-' + idx);
+  msg.style.color = '#666';
+  msg.textContent = 'Pricing...';
+  try {
+    var resp = await fetch('/drawing-cost', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: r.job_id, quantity: qty, overrides: ov})});
+    var data = await resp.json();
+    if (!resp.ok) { msg.style.color = '#b00020'; msg.textContent = data.error || 'Re-price failed'; return; }
+    r.cost_estimate = data.cost_estimate;
+    document.getElementById('dcost-' + idx).innerHTML = renderCostEstimate(data.cost_estimate);
+    msg.style.color = '#1b7a1b';
+    msg.textContent = 'Updated';
+  } catch (e) {
+    msg.style.color = '#b00020';
+    msg.textContent = String(e);
+  }
+}
+
 function renderDrawingResult(r, idx) {
   const d = r.drawing_data;
   const fabLabel = d.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (d.likely_fab_type === 'machined' ? 'Machined' : 'Unknown');
@@ -1414,9 +1709,7 @@ function renderDrawingResult(r, idx) {
     html += '</table>';
   }
 
-  if (r.cost_estimate) {
-    html += renderCostEstimate(r.cost_estimate);
-  }
+  html += renderDrawingPricing(r, idx);
 
   // Download buttons - STEP-style row with combined PDF prominent
   html += '<div class="dl-row">';
@@ -1534,7 +1827,7 @@ function renderDrawingResult(r, idx) {
 }
 
 function exportDrawingCSV(idx) {
-  var r = _allResults.filter(function(x){return !x.error && x.drawing_data;})[idx] || _allResults.filter(function(x){return x.drawing_data;})[0];
+  var r = _allResults[idx];
   if (!r || !r.drawing_data) return;
   var d = r.drawing_data;
   var rows = [["Field","Value"]];
@@ -1621,7 +1914,7 @@ function togglePage(el) {
 }
 
 function exportCSV(idx) {
-  var r = _allResults.filter(function(x){return !x.error;})[idx] || _allResults[idx];
+  var r = _allResults[idx];
   if (!r || !r.geometry) return;
   var g = r.geometry, env = g.envelope;
   var rows = [["Field","Value"]];
@@ -1689,7 +1982,7 @@ function printQuote(idx) {
 }
 
 function downloadQuotePDF(idx) {
-  var r = _allResults.filter(function(x){return !x.error;})[idx] || _allResults[idx];
+  var r = _allResults[idx];
   if (!r || !r.job_id) { alert("No job data available for PDF export."); return; }
   var mat = document.getElementById("material");
   var qty = document.getElementById("quantity");
@@ -1763,6 +2056,7 @@ var CFG_SECTIONS = {
   saw_time_per_cut: {label: "Saw Time per Cut (hr)", unit: "hr"},
   mrr_turning: {label: "CNC Turning MRR (in3/min)", unit: "in3/min"},
   mrr_milling: {label: "CNC Milling MRR (in3/min)", unit: "in3/min"},
+  machine_capacity: {label: "Machine Capacity (in)", unit: "in", note: "st30_x / tl2_x = max turning diameter, st30_z / tl2_z = max turning length"},
 };
 
 var CFG_SCALARS = {
@@ -2195,15 +2489,6 @@ def _generate_drawing_flat_pattern(drawing_data, out_path):
     bends = best.get("bends", drawing_data.get("bends", {}))
     features = best.get("features", drawing_data.get("features", []))
 
-    # Use largest dimension set
-    if dims:
-        d = max(dims, key=lambda x: x.get("length", 0) * x.get("width", 0))
-        overall_length = d.get("length", 10.0)
-        overall_width = d.get("width", 5.0)
-    else:
-        overall_length = 10.0
-        overall_width = 5.0
-
     thickness = thickness_list[0]["value_in"] if thickness_list else 0.060
 
     bend_angles = [b["value_deg"] for b in bends.get("angles", [])]
@@ -2212,16 +2497,31 @@ def _generate_drawing_flat_pattern(drawing_data, out_path):
     bend_radius = bend_radii[0] if bend_radii else thickness
     k_factor = 0.44
 
-    # Compute developed width: add bend allowances to the formed dimension
-    if num_bends > 0:
+    # Part size: prefer the dimension-text envelope, then LxW callouts, then a default
+    env = best.get("envelope_estimate") or drawing_data.get("envelope_estimate") or {}
+    if env.get("length_in") and env.get("width_in"):
+        overall_length = env["length_in"]
+        overall_width = env["width_in"]
+        size_source = "flat_view" if env.get("is_flat_view") else "formed_envelope"
+    elif dims:
+        d = max(dims, key=lambda x: x.get("length", 0) * x.get("width", 0))
+        overall_length = d.get("length", 10.0)
+        overall_width = d.get("width", 5.0)
+        size_source = "dimension_callout"
+    else:
+        overall_length = 10.0
+        overall_width = 5.0
+        size_source = "default"
+
+    if size_source == "flat_view" or num_bends == 0:
+        # dimensions were taken off the flat pattern itself - no bend allowance to add
+        flat_width = overall_width
+    else:
         total_ba = 0
         for angle_deg in bend_angles:
             angle_rad = math.radians(angle_deg)
-            ba = angle_rad * (bend_radius + k_factor * thickness)
-            total_ba += ba
+            total_ba += angle_rad * (bend_radius + k_factor * thickness)
         flat_width = overall_width + total_ba
-    else:
-        flat_width = overall_width
     flat_length = overall_length
 
     # Store computed values back into drawing_data for frontend
@@ -2233,6 +2533,8 @@ def _generate_drawing_flat_pattern(drawing_data, out_path):
         "bend_radius_in": round(bend_radius, 4),
         "k_factor": k_factor,
         "bend_angles": bend_angles,
+        "size_source": size_source,
+        "thickness_found": bool(thickness_list),
     }
 
     # Create figure
@@ -2903,17 +3205,6 @@ def analyze():
         if "error" in drawing_data:
             return jsonify({"error": drawing_data["error"]}), 500
 
-        # Cost estimate for machined (turned) parts read from the drawing
-        try:
-            if drawing_data.get("likely_fab_type") == "machined":
-                dgeo, dmat = _build_drawing_cost_geometry(drawing_data)
-                if dgeo:
-                    drawing_data["cost_estimate"] = cost_engine.estimate_cost(
-                        dgeo, dmat, quantity, config=_get_config())
-                    drawing_data["cost_estimate"]["bar_stock_in"] = dgeo["bar_stock_in"]
-        except Exception as dce:
-            print(f"Warning: drawing cost estimate failed (non-fatal): {dce}")
-
         # Generate flat pattern image from drawing data
         flat_path = os.path.join(job_dir, "flat_pattern.png")
         try:
@@ -2921,6 +3212,23 @@ def analyze():
                 _generate_drawing_flat_pattern(drawing_data, flat_path)
         except Exception as fp_err:
             print(f"Warning: Failed to generate drawing flat pattern: {fp_err}")
+
+        # Price the drawing (sheet metal or machined) and keep job state for re-pricing / quote PDF
+        try:
+            est, _cgeo, cost_msg = _drawing_cost(drawing_data, quantity, None, material_name)
+            if est:
+                drawing_data["cost_estimate"] = est
+            elif cost_msg:
+                drawing_data["cost_message"] = cost_msg
+        except Exception as dce:
+            print(f"Warning: drawing cost estimate failed (non-fatal): {dce}")
+            drawing_data["cost_message"] = "Cost estimate failed - see server log."
+        try:
+            with open(os.path.join(job_dir, "drawing_state.json"), "w") as sf:
+                json.dump({"drawing_data": drawing_data, "fallback_material": material_name,
+                           "overrides": {}}, sf, default=str)
+        except Exception as se:
+            print(f"Warning: could not save drawing state: {se}")
 
         # Generate overall report PDF
         report_path = os.path.join(job_dir, f"{part_stem}_report.pdf")
@@ -3125,11 +3433,63 @@ def analyze():
     return jsonify(resp)
 
 
+@app.route("/drawing-cost", methods=["POST"])
+def drawing_cost():
+    """Re-price a drawing with estimator overrides (flat size, thickness, bends, OD, length)."""
+    body = request.get_json(force=True) or {}
+    job_id = secure_filename(str(body.get("job_id", "")))
+    state_path = os.path.join(app.config["UPLOAD_FOLDER"], job_id, "drawing_state.json")
+    if not job_id or not os.path.isfile(state_path):
+        return jsonify({"error": "Job not found - re-upload the drawing."}), 404
+    with open(state_path) as f:
+        state = json.load(f)
+    try:
+        quantity = max(1, int(body.get("quantity", 1)))
+    except (TypeError, ValueError):
+        quantity = 1
+    ov = {k: v for k, v in (body.get("overrides") or {}).items() if v not in (None, "")}
+    est, _geo, msg = _drawing_cost(state["drawing_data"], quantity, ov or {"_manual": True},
+                                   state.get("fallback_material"))
+    if not est:
+        return jsonify({"error": msg or "Could not price this drawing."}), 400
+    state["overrides"] = ov
+    state["quantity"] = quantity
+    with open(state_path, "w") as f:
+        json.dump(state, f, default=str)
+    return jsonify({"cost_estimate": est})
+
+
 @app.route("/quote-pdf/<job_id>")
 def generate_quote_pdf(job_id):
     """Generate a CMC-branded customer-facing quote PDF."""
+    job_id = secure_filename(job_id)
     job_dir = os.path.join(app.config["UPLOAD_FOLDER"], job_id)
     json_path = os.path.join(job_dir, "geometry_extract.json")
+
+    # PDF drawing jobs: quote from the saved drawing state (incl. estimator overrides)
+    state_path = os.path.join(job_dir, "drawing_state.json")
+    if os.path.isfile(state_path):
+        with open(state_path) as f:
+            state = json.load(f)
+        try:
+            quantity = max(1, int(request.args.get("quantity", state.get("quantity", 1))))
+        except (ValueError, TypeError):
+            quantity = 1
+        dd = state["drawing_data"]
+        est, cgeo, msg = _drawing_cost(dd, quantity, state.get("overrides") or None,
+                                       state.get("fallback_material"))
+        if not est:
+            return jsonify({"error": msg or "This drawing can't be priced yet."}), 400
+        qgeo = _drawing_quote_geometry(dd, cgeo)
+        quote_path = os.path.join(job_dir, "customer_quote.pdf")
+        try:
+            _generate_customer_quote_pdf(qgeo, est, None, est.get("material_display", ""), quantity,
+                                         request.args.get("customer", ""), request.args.get("po", ""),
+                                         request.args.get("notes", ""), quote_path, job_id)
+        except Exception as e:
+            return jsonify({"error": f"PDF generation failed: {e}"}), 500
+        return send_file(quote_path, mimetype="application/pdf", as_attachment=True,
+                         download_name=f"CMC_Quote_{job_id}.pdf")
 
     if not os.path.exists(json_path):
         return jsonify({"error": "Job not found"}), 404
@@ -3140,8 +3500,9 @@ def generate_quote_pdf(job_id):
     except Exception as e:
         return jsonify({"error": f"Failed to read job data: {e}"}), 500
 
-    # Get parameters from query string
+    # Get parameters from query string (the material select sends density values like "7.9")
     material_name = request.args.get("material", "Mild/Carbon Steel")
+    material_name = DENSITY_TO_MATERIAL.get(material_name, material_name)
     try:
         quantity = max(1, int(request.args.get("quantity", "1")))
     except (ValueError, TypeError):
@@ -3313,6 +3674,9 @@ def _generate_customer_quote_pdf(geometry, cost_est, nesting, material, qty,
         if other_ct: feat_str.append(f"{other_ct} other")
         part_rows.append([Paragraph("Features", body_s),
                          Paragraph(f'{len(features)} total ({", ".join(feat_str)})', body_s)])
+
+    for label, value in geometry.get("quote_extra_rows", []) or []:
+        part_rows.append([Paragraph(str(label), body_s), Paragraph(str(value), body_s)])
 
     t = Table(part_rows, colWidths=[2.0*inch, 4.2*inch])
     t.setStyle(TableStyle([
@@ -3844,7 +4208,7 @@ pre{white-space:pre-wrap;font-size:11px;background:#fafafa;border:1px solid #eee
 <p>Drop the regression fixture files (STEP and PDF). Each file runs through the live analysis pipeline and is checked
 against the expected values recorded for it. Files are matched by content hash, not by name.</p>
 <div class="drop" id="drop">Click or drop fixture files here<br><span class="small" id="picked">No files selected</span></div>
-<input type="file" id="files" multiple style="display:none" accept=".step,.stp,.pdf,.sldprt,.igs,.iges">
+<input type="file" id="files" multiple style="display:none" accept=".step,.stp,.pdf,.dxf,.sldprt,.igs,.iges">
 <button id="run" disabled>Run tests</button>
 <div id="summary"></div>
 <table id="tbl" style="display:none"><thead><tr><th>Result</th><th>Test</th><th>File</th><th>Details</th><th>Time</th></tr></thead><tbody></tbody></table>

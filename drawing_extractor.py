@@ -28,6 +28,11 @@ try:
 except Exception:
     iso286 = None
 
+try:
+    import dxf_reader
+except Exception:
+    dxf_reader = None
+
 # ── Material database ──────────────────────────────────────────────────
 KNOWN_MATERIALS = {
     # Stainless steels
@@ -330,7 +335,29 @@ def find_materials(text):
     return unique
 
 
-def find_thickness(text, material_family=None):
+def detect_units(text):
+    """Return 'mm' or 'in' for the drawing's linear dimensions.
+
+    Explicit statements win ("DIMENSIONS ARE IN MILLIMETERS/INCHES", "ALL DIMENSIONS
+    IN MM", "UNITS: MM").  Dual-unit tolerance tables that list both MILLIMETERS
+    and INCHES default to inches unless stated.  Otherwise metric is inferred
+    from comma decimals ("-0,5") and "<n>mm" tokens.
+    """
+    up = text.upper()
+    if re.search(r'DIMENSIONS?\s+(?:ARE\s+)?(?:SHOWN\s+)?IN\s+(?:MILLIMET|MM\b)|ALL\s+DIMENSIONS\s+(?:ARE\s+)?IN\s+(?:MM|MILLIMET)'
+                 r'|UNITS?\s*[:=]?\s*(?:MM|MILLIMET)', up):
+        return "mm"
+    if re.search(r'DIMENSIONS?\s+(?:ARE\s+)?(?:SHOWN\s+)?IN\s+INCH|UNITS?\s*[:=]?\s*INCH', up):
+        return "in"
+    comma_dec = len(re.findall(r'(?<![\d,])[-+]?\d{1,4},\d{1,3}(?![\d,])', text))
+    mm_tok = len(re.findall(r'\d\s*MM\b', up))
+    inch_tok = len(re.findall(r'\d\s*(?:"|IN\b|INCH)', up))
+    if (comma_dec >= 3 or mm_tok >= 3) and inch_tok < max(comma_dec, mm_tok):
+        return "mm"
+    return "in"
+
+
+def find_thickness(text, material_family=None, units="in"):
     """Extract sheet thickness from drawing.
 
     Args:
@@ -354,8 +381,13 @@ def find_thickness(text, material_family=None):
         if val:
             try:
                 t = float(val)
-                if 0.005 <= t <= 1.0:  # reasonable sheet metal thickness in inches
-                    results.append({"value_in": round(t, 4), "gauge": None, "raw": m.group(0).strip()})
+                if units == "mm" and '"' not in m.group(0) and 'IN' not in m.group(0).upper():
+                    if 0.3 <= t <= 25:
+                        results.append({"value_in": round(t / 25.4, 4), "gauge": None, "_pos": m.start(),
+                                        "raw": m.group(0).strip() + " (mm)", "unit": "mm", "value_mm": t})
+                elif 0.005 <= t <= 1.0:  # reasonable sheet metal thickness in inches
+                    results.append({"value_in": round(t, 4), "gauge": None, "raw": m.group(0).strip(),
+                                    "_pos": m.start()})
             except ValueError:
                 pass
 
@@ -367,6 +399,7 @@ def find_thickness(text, material_family=None):
                 g = int(val)
                 if g in gauge_table:
                     results.append({
+                        "_pos": m.start(),
                         "value_in": gauge_table[g],
                         "gauge": g,
                         "raw": m.group(0).strip(),
@@ -383,7 +416,7 @@ def find_thickness(text, material_family=None):
         except ValueError:
             continue
         if 0.3 <= mm <= 25:
-            results.append({"value_in": round(mm / 25.4, 4), "gauge": None,
+            results.append({"value_in": round(mm / 25.4, 4), "gauge": None, "_pos": m.start(),
                             "raw": m.group(0).strip(), "unit": "mm", "value_mm": mm})
 
     # Contextual thickness: if drawing has bends but no explicit thickness yet,
@@ -414,6 +447,11 @@ def find_thickness(text, material_family=None):
                             break
                 except ValueError:
                     pass
+
+    # Explicit callouts in document order (first mention wins); inferred ones stay last
+    results.sort(key=lambda t: (1 if "inferred" in str(t.get("raw", "")) else 0, t.get("_pos", 10 ** 9)))
+    for t in results:
+        t.pop("_pos", None)
 
     # Deduplicate
     seen = set()
@@ -742,7 +780,19 @@ def find_finishes(text):
     return unique
 
 
-def find_features(text):
+def find_features(text, units="in"):
+    feats = _find_features_raw(text, units)
+    if units == "mm":
+        for f in feats:
+            for k in ("diameter_in", "cbore_dia_in", "cbore_depth_in", "csink_dia_in", "width_in", "length_in"):
+                if f.get(k):
+                    f[k.replace("_in", "_mm")] = f[k]
+                    f[k] = round(f[k] / 25.4, 4)
+            f["units"] = "mm"
+    return feats
+
+
+def _find_features_raw(text, units="in"):
     """Extract hole/feature callouts like '4X .28 THRU', 'dia 1.27 THRU', etc."""
     features = []
 
@@ -766,7 +816,7 @@ def find_features(text):
             dia = float(m.group(2))
         except (ValueError, TypeError):
             continue
-        if dia < 0.01 or dia > 10.0:
+        if dia < 0.01 or dia > (250.0 if units == "mm" else 10.0):
             continue
         # Allow count even across newlines for round holes (PDF text extraction
         # often breaks annotations across lines). Only reject if there's substantial
@@ -899,7 +949,8 @@ def find_features(text):
             l = float(m.group(3))
         except (ValueError, TypeError):
             continue
-        if w < 0.01 or l < 0.01 or w > 20 or l > 20:
+        lim = 500 if units == "mm" else 20
+        if w < 0.01 or l < 0.01 or w > lim or l > lim:
             continue
         count = int(m.group(1)) if m.group(1) else 1
         features.append({
@@ -979,7 +1030,8 @@ def classify_drawing(text, thickness, bends, fits):
     # --- sheet metal evidence ---
     if thickness:
         t0 = thickness[0]
-        if t0.get("gauge") or "THK" in str(t0.get("raw", "")).upper() or "THICK" in str(t0.get("raw", "")).upper():
+        raw_up = str(t0.get("raw", "")).upper()
+        if t0.get("gauge") or "THK" in raw_up or "THICK" in raw_up or "SHEET" in raw_up or "PLATE" in raw_up:
             add("s", 3, f"thickness/gauge '{t0.get('raw')}'")
     if re.search(r'\b(?:UP|DN|DOWN)\s*\d{1,3}\s*°|\bBEND\s*(?:LINE|RADIUS|RAD\b|R\b)|INSIDE\s+RAD|\bFLAT\s+PATTERN\b|K-?\s*FACTOR|\bFORMED\b|\bPRESS\s*BRAKE\b|\bBRAKE\b|\bHEM(?:MED)?\b', up):
         add("s", 3, "bend/flat-pattern notation")
@@ -998,7 +1050,7 @@ def classify_drawing(text, thickness, bends, fits):
     return "unknown", "low", ev
 
 
-def find_machined_stock(text, fits=None, density_gcc=None):
+def find_machined_stock(text, fits=None, density_gcc=None, units="in"):
     """Estimate raw stock for a machined (turned) part: OD, ID and overall length."""
     clean = _TOL_BLOCK_RE.sub(' ', text)
     DIA = r'[∅Ø⌀]'
@@ -1032,6 +1084,19 @@ def find_machined_stock(text, fits=None, density_gcc=None):
             lengths.append(float(m.group(1)))
         except ValueError:
             pass
+    if units == "mm":
+        # metric drawings: accept 1-2 place decimals and whole numbers as lengths
+        lengths = []
+        for m in re.finditer(r'(?<![\d.,+\-/])(\d{1,4}(?:[.,]\d{1,2})?)(?![\d])', clean):
+            try:
+                v = float(m.group(1).replace(',', '.'))
+            except ValueError:
+                continue
+            if 5 <= v <= 3000:
+                lengths.append(v)
+        diameters = [d / 25.4 for d in diameters]
+        ids = [d / 25.4 for d in ids]
+        lengths = [v / 25.4 for v in lengths]
     od = max(diameters) if diameters else None
     overall_len = max(lengths) if lengths else None
     if od and overall_len and overall_len < od:
@@ -1072,7 +1137,7 @@ def finalize_fab_type(result, text):
                 density = mat["density_gcc"]
                 break
         result["machined_stock"] = find_machined_stock(
-            text, [{"nominal_in": f["nominal_in"]} for f in fits], density)
+            text, [{"nominal_in": f["nominal_in"]} for f in fits], density, units=result.get("units", "in"))
     elif fab == "unknown":
         has_dims = bool(result.get("dimensions")) or bool(result.get("materials"))
         result["fab_type_confidence"] = "low" if has_dims else "none"
@@ -1257,20 +1322,27 @@ def _analyze_single_page(page_text, page_num, words=None):
             mat_family = 'stainless'
             break
 
+    units = detect_units(page_text)
     result = {
         "page": page_num,
+        "units": units,
         "materials": materials,
-        "thickness": find_thickness(page_text, material_family=mat_family),
+        "thickness": find_thickness(page_text, material_family=mat_family, units=units),
         "dimensions": find_dimensions(page_text),
         "tolerances": find_tolerances(page_text),
         "bends": find_bends(page_text),
         "finishes": find_finishes(page_text),
         "part_info": find_part_info(page_text),
-        "features": find_features(page_text),
+        "features": find_features(page_text, units),
     }
 
     # Coordinate-based enrichment (title block cells, stacked limits, ISO fits)
     apply_layout(result, words)
+    if drawing_layout is not None and words:
+        try:
+            result["envelope_estimate"] = drawing_layout.estimate_envelope(words, page_text, units)
+        except Exception:
+            pass
 
     # Determine fab type (machined vs sheet metal) and scrub irrelevant fields
     finalize_fab_type(result, page_text)
@@ -1302,16 +1374,105 @@ def _analyze_single_page(page_text, page_num, words=None):
     return result
 
 
+def _analyze_dxf(path, dxf, text, pages):
+    """Build a drawing result from a DXF: geometry is exact, text supplies material/notes."""
+    units = dxf.get("units", "in")
+    materials = find_materials(text)
+    fam = next((m.get("family") for m in materials if m.get("family")), None)
+    result = {
+        "units": units,
+        "materials": materials,
+        "thickness": find_thickness(text, material_family=fam, units=units) if text else [],
+        "dimensions": [],
+        "tolerances": find_tolerances(text) if text else [],
+        "bends": find_bends(text) if text else {"radii": [], "angles": []},
+        "finishes": find_finishes(text) if text else [],
+        "part_info": find_part_info(text) if text else {},
+        "features": [],
+    }
+    # Holes: exact circles from geometry; taps/slots only from text notes
+    for h in dxf.get("holes_in", []):
+        result["features"].append({"type": "round_hole", "count": h["count"], "diameter_in": h["diameter_in"],
+                                   "through": True, "raw": f'DXF circle dia {h["diameter_in"]}"'})
+    if text:
+        for f in find_features(text, units):
+            if f["type"] != "round_hole":
+                result["features"].append(f)
+    # Bends: text callouts first, else one bend per bend line (assumed 90 deg)
+    if not result["bends"]["angles"] and dxf.get("bend_lines"):
+        result["bends"]["angles"] = [{"value_deg": 90.0, "raw": "DXF bend line (angle assumed 90)"}
+                                     for _ in range(dxf["bend_lines"])]
+    # Envelope: pure flat pattern -> geometry extents; full drawing sheet -> largest dimensions
+    n_text = len(dxf.get("texts", []))
+    dims = sorted({d for d in dxf.get("dims_in", []) if 0.25 <= d <= 160}, reverse=True)
+    if n_text > 15 and len(dims) >= 2:
+        result["envelope_estimate"] = {"length_in": dims[0], "width_in": dims[1],
+                                       "is_flat_view": bool(dxf.get("bend_lines")), "source": "dxf_dimensions"}
+    else:
+        bb = dxf["bbox_in"]
+        result["envelope_estimate"] = {"length_in": bb["length_in"], "width_in": bb["width_in"],
+                                       "is_flat_view": True, "source": "dxf_geometry"}
+        result["dxf_cut_length_in"] = dxf.get("cut_length_in")
+    result["dxf_geometry"] = {k: dxf[k] for k in ("units", "cut_length_in", "bbox_in", "holes_in",
+                                                   "bend_lines", "entity_counts")}
+    finalize_fab_type(result, text or "")
+    if result["likely_fab_type"] == "unknown":
+        # a 2D cut profile with no machining evidence is a laser / sheet part
+        result["likely_fab_type"] = "sheet_metal"
+        result["fab_type_confidence"] = "medium"
+        result.setdefault("fab_type_evidence", {}).setdefault("sheet_metal", []).append("2D DXF cut profile")
+        result["missing_info"] = identify_missing_info(result)
+    env = result["envelope_estimate"]
+    parts = []
+    if result["materials"]:
+        parts.append("Material: " + (result["materials"][0].get("name") or result["materials"][0]["raw_callout"]))
+    if result["thickness"]:
+        parts.append(f'Thickness: {result["thickness"][0]["value_in"]}"')
+    parts.append(f'DXF {env["length_in"]}" x {env["width_in"]}"')
+    if result.get("dxf_cut_length_in"):
+        parts.append(f'cut length {result["dxf_cut_length_in"]}"')
+    parts.append(f'{sum(h["count"] for h in dxf.get("holes_in", []))} holes')
+    result.update({
+        "source_file": os.path.basename(path),
+        "file_type": "dxf_drawing",
+        "page_count": 1,
+        "drawing_page_count": 1,
+        "is_scanned": False,
+        "pages": [],
+        "summary": " | ".join(parts),
+    })
+    return result
+
+
 def analyze_drawing(pdf_path):
     """Main analysis pipeline for a PDF drawing — per-page extraction."""
     if not os.path.isfile(pdf_path):
         return {"error": f"File not found: {pdf_path}"}
 
     ext = os.path.splitext(pdf_path)[1].lower()
-    if ext not in (".pdf",):
-        return {"error": f"Unsupported file type: {ext}. Currently supports PDF."}
+    if ext == ".dwg":
+        return {"error": "DWG is AutoCAD's native binary format and can't be read directly. "
+                         "In AutoCAD/DraftSight use Save As > DXF (or Plot > PDF) and upload that file."}
+    if ext not in (".pdf", ".dxf"):
+        return {"error": f"Unsupported file type: {ext}. Upload a PDF or DXF drawing."}
 
     # 1. Extract text
+    dxf = None
+    if ext == ".dxf":
+        if dxf_reader is None:
+            return {"error": "DXF support is not available on this server."}
+        try:
+            dxf = dxf_reader.read_dxf(pdf_path)
+        except Exception as e:
+            return {"error": f"Failed to read DXF: {e}"}
+        if dxf.get("error"):
+            return {"error": dxf["error"]}
+        full_text = "\n".join(dxf["texts"])
+        pages = [{"page": 1, "text": full_text, "has_text": len(full_text.strip()) > 20}]
+        is_scanned = False
+        if not dxf.get("bbox_in"):
+            return {"error": "No cut geometry found in this DXF."}
+        return _analyze_dxf(pdf_path, dxf, full_text, pages)
     try:
         full_text, pages, is_scanned = extract_text_from_pdf(pdf_path)
     except Exception as e:
@@ -1363,15 +1524,17 @@ def analyze_drawing(pdf_path):
             overall_mat_family = 'stainless'
             break
 
+    doc_units = detect_units(full_text)
     overall = {
+        "units": doc_units,
         "materials": all_materials,
-        "thickness": find_thickness(full_text, material_family=overall_mat_family),
+        "thickness": find_thickness(full_text, material_family=overall_mat_family, units=doc_units),
         "dimensions": find_dimensions(full_text),
         "tolerances": find_tolerances(full_text),
         "bends": find_bends(full_text),
         "finishes": find_finishes(full_text),
         "part_info": find_part_info(full_text),
-        "features": find_features(full_text),
+        "features": find_features(full_text, doc_units),
     }
     # Layout enrichment across all pages (title block from the first page that has one)
     all_words = [w for pw in page_words for w in (pw or [])]
@@ -1379,6 +1542,12 @@ def analyze_drawing(pdf_path):
         first_tb_words = next((pw for pw in page_words
                                if pw and drawing_layout.read_title_block(pw)), page_words[0])
         apply_layout(overall, first_tb_words)
+        try:
+            idx0 = page_words.index(first_tb_words)
+            overall["envelope_estimate"] = drawing_layout.estimate_envelope(
+                first_tb_words, pages[idx0]["text"] if idx0 < len(pages) else full_text, doc_units)
+        except Exception:
+            pass
         if len(page_words) > 1:
             # stacked tolerances from the remaining pages
             extra = {"tolerances": overall["tolerances"]}

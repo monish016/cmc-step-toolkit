@@ -99,6 +99,11 @@ def summarize_drawing(d):
         "holes": holes,
         "tapped": tapped,
         "pages": d.get("drawing_page_count"),
+        "units": d.get("units"),
+        "cut": d.get("dxf_cut_length_in"),
+        "flat_l": (d.get("_computed_flat") or {}).get("flat_length_in"),
+        "flat_w": (d.get("_computed_flat") or {}).get("flat_width_in"),
+        "priced": bool(d.get("cost_estimate")),
     }
 
 
