@@ -26,13 +26,15 @@ from OCP.GeomAbs import (GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone,
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
 from OCP.gp import gp_Pln, gp_Pnt, gp_Dir
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_EDGE
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL
 from OCP.TopoDS import TopoDS
+from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid
+from OCP.ShapeFix import ShapeFix_Solid
 
 # ==========================================================================
 # CMC K-FACTOR LOOKUP TABLES
 # Green-highlighted (recommended) values from CMC press brake tables.
-# Key: thickness_in -> list of (bend_radius_in, k_factor) sorted by preference.
+# Key: thickness_in → list of (bend_radius_in, k_factor) sorted by preference.
 # ==========================================================================
 _CMC_KFACTOR_STEEL = {
     0.030: [(0.078, 0.406), (0.109, 0.487)],
@@ -161,54 +163,141 @@ def lookup_hardware(diameter_in):
         return best
     return None
 
+
 def lookup_k_factor(thickness_in, bend_radius_in=None, material="steel"):
-    """Look up CMC-recommended K-factor from press brake tables."""
+    """Look up CMC-recommended K-factor from press brake tables.
+
+    If bend_radius_in is provided, picks the entry whose bend radius is closest.
+    Otherwise returns the first (preferred) entry.
+    Returns (k_factor, matched_bend_radius_in, source) tuple.
+    """
     table = _CMC_KFACTOR_STAINLESS if "stainless" in material.lower() else _CMC_KFACTOR_STEEL
+
+    # Find closest thickness in table
     best_thick = min(table.keys(), key=lambda t: abs(t - thickness_in))
+    # Only match if within 15% of a table entry
     if abs(best_thick - thickness_in) / max(thickness_in, 0.001) > 0.15:
         return (0.44, None, "default (no table match)")
+
     entries = table[best_thick]
     if bend_radius_in is not None and bend_radius_in > 0:
+        # Pick entry whose bend radius is closest to detected
         best = min(entries, key=lambda e: abs(e[0] - bend_radius_in))
-        return (best[1], best[0], "CMC table (gauge " + str(best_thick) + '\")')
+        return (best[1], best[0], f"CMC table (gauge {best_thick}\")")
     else:
-        return (entries[0][1], entries[0][0], "CMC table (gauge " + str(best_thick) + '\")')
+        # Use first (preferred) entry
+        return (entries[0][1], entries[0][0], f"CMC table (gauge {best_thick}\")")
 
 
 # --------------------------------------------------------------------------
 # 1. LOAD + ENVELOPE
 # --------------------------------------------------------------------------
+def _try_sew_to_solid(shape):
+    """Attempt to sew loose faces/shells into a closed solid."""
+    try:
+        sewer = BRepBuilderAPI_Sewing(1e-3)
+        # Feed all faces from the shape into the sewer
+        explorer = TopExp_Explorer(shape.val().wrapped, TopAbs_FACE)
+        face_count = 0
+        while explorer.More():
+            sewer.Add(explorer.Current())
+            face_count += 1
+            explorer.Next()
+        if face_count < 3:
+            return None  # too few faces for a solid
+        sewer.Perform()
+        sewn = sewer.SewedShape()
+        if sewn is None:
+            return None
+        # Try to extract shells from the sewn shape, then make solid
+        shell_exp = TopExp_Explorer(sewn, TopAbs_SHELL)
+        while shell_exp.More():
+            shell = TopoDS.Shell_s(shell_exp.Current())
+            try:
+                maker = BRepBuilderAPI_MakeSolid(shell)
+                if maker.IsDone():
+                    solid = maker.Solid()
+                    # Fix the solid orientation
+                    fixer = ShapeFix_Solid(solid)
+                    fixer.Perform()
+                    fixed = fixer.Solid()
+                    vol = abs(cq.Shape(fixed).Volume())
+                    if vol > 1e-6:
+                        print(f"Surface sewing succeeded: {face_count} faces sewn into solid (vol={vol:.1f} mm3)")
+                        return cq.Shape(fixed)
+            except Exception:
+                pass
+            shell_exp.Next()
+        return None
+    except Exception as e:
+        print(f"Surface sewing failed: {e}")
+        return None
+
+
 def load_step(path):
     shape = importers.importStep(path)
     # Handle assemblies: if the STEP file contains multiple solids,
     # fuse them or pick the largest by volume.
     solids = shape.solids().vals()
     if not solids:
-        raise ValueError("STEP file contains no solid bodies â possibly a wireframe or surface model.")
+        # No solids found -- try to sew surfaces/shells into a solid
+        print("No solid bodies found. Attempting surface sewing...")
+        sewn_solid = _try_sew_to_solid(shape)
+        if sewn_solid is not None:
+            print("Surface sewing produced a valid solid.")
+            return shape, sewn_solid
+        # Sewing failed -- return shape with None solid for surface-only analysis
+        print("Surface sewing did not produce a valid solid. Using surface-only analysis.")
+        return shape, None
     if len(solids) == 1:
         solid = solids[0]
     else:
-        # Multiple solids (assembly) â pick largest by volume for analysis
+        # Multiple solids (assembly) — pick largest by volume for analysis
         solid = max(solids, key=lambda s: abs(s.Volume()))
         print(f"Warning: STEP file contains {len(solids)} solids (assembly). "
               f"Analyzing the largest solid by volume.")
     return shape, solid
 
 
-def get_envelope(solid, density_g_cm3=7.9):
-    bb = solid.BoundingBox()
-    vol_mm3 = abs(solid.Volume())  # abs() guards against reversed normals
-    if vol_mm3 < 1e-6:
-        raise ValueError("Solid has near-zero volume â degenerate or empty geometry.")
+def get_envelope(solid, density_g_cm3=7.9, shape=None):
+    """Get envelope data. If solid is None (surface model), compute from shape faces."""
+    if solid is not None:
+        bb = solid.BoundingBox()
+        vol_mm3 = abs(solid.Volume())  # abs() guards against reversed normals
+        if vol_mm3 < 1e-6:
+            raise ValueError("Solid has near-zero volume — degenerate or empty geometry.")
+        area_mm2 = 0
+        try:
+            faces = cq.Workplane().add(solid).faces().vals()
+            area_mm2 = sum(abs(f.Area()) for f in faces)
+        except Exception:
+            pass
+    else:
+        # Surface-only: get bounding box and area from shape faces
+        if shape is None:
+            raise ValueError("No solid and no shape available for analysis.")
+        # shape is a Workplane; get bounding box from the underlying compound
+        _compound = shape.val()
+        bb = _compound.BoundingBox()
+        vol_mm3 = 0.0
+        area_mm2 = 0
+        try:
+            faces = shape.faces().vals()
+            area_mm2 = sum(abs(f.Area()) for f in faces)
+            # Estimate volume from bounding box and surface area
+            # For a surface model, we estimate using the thinnest dimension
+            dims = sorted([max(bb.xlen, 1e-6), max(bb.ylen, 1e-6), max(bb.zlen, 1e-6)])
+            # Estimate: area of large faces * thickness (thinnest dim)
+            vol_mm3 = area_mm2 / 2.0 * dims[0]  # rough estimate
+        except Exception:
+            pass
+        if vol_mm3 < 1e-6:
+            # Fallback: use bounding box volume * fill factor
+            vol_mm3 = max(bb.xlen, 1e-6) * max(bb.ylen, 1e-6) * max(bb.zlen, 1e-6) * 0.3
+
     vol_cm3 = vol_mm3 / 1000.0
     mass_g = vol_cm3 * density_g_cm3
     mass_lb = mass_g / 453.592
-    area_mm2 = 0
-    try:
-        faces = cq.Workplane().add(solid).faces().vals()
-        area_mm2 = sum(abs(f.Area()) for f in faces)
-    except Exception:
-        pass
     # Guard against degenerate bounding boxes
     xlen = max(bb.xlen, 1e-6)
     ylen = max(bb.ylen, 1e-6)
@@ -224,6 +313,8 @@ def get_envelope(solid, density_g_cm3=7.9):
         "mass_g": mass_g,
         "mass_lb": mass_lb,
         "mass_kg": mass_g / 1000.0,
+        "is_surface_model": solid is None,
+        "volume_estimated": solid is None,
     }
 
 
@@ -380,7 +471,7 @@ def classify_fab_type(shape, solid, envelope, planar, cyl, other):
         # Sub-classify: turning vs milling
         sub_type = classify_machining_type(cyl_infos, planar, total_faces, dims)
     else:
-        # Ambiguous â default to sheet metal if we have bends, else machined
+        # Ambiguous — default to sheet metal if we have bends, else machined
         if has_bends:
             fab_type = "sheet_metal"
             sub_type = None
@@ -437,7 +528,7 @@ def classify_machining_type(cyl_infos, planar, total_faces, dims_sorted):
                          and info["u_sweep_deg"] > 350)
 
     # Turning: >60% of cyl area on one axis, many full-revolution faces
-    # Also check aspect ratio â turning parts tend to be long in one dimension
+    # Also check aspect ratio — turning parts tend to be long in one dimension
     turning_score = 0
     if dominant_area_ratio > 0.7:
         turning_score += 2
@@ -550,7 +641,8 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
     for i, f, surf in planar:
         pln = surf.Plane()
         n = pln.Axis().Direction()
-        n_key = (round(abs(n.X()), 1), round(abs(n.Y()), 1), round(abs(n.Z()), 1))
+        # Preserve sign so +Z (top) and -Z (bottom) faces stay in separate groups
+        n_key = (round(n.X(), 1), round(n.Y(), 1), round(n.Z(), 1))
         loc = pln.Location()
         area = f.Area()
         ctr = f.Center()
@@ -562,6 +654,11 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
             "center": (ctr.x, ctr.y, ctr.z),
         })
 
+    # Compute part thickness = smallest bounding box dimension
+    # Pocket depth cannot exceed this — anything deeper is a profile/edge, not a pocket
+    bbox_dims = sorted([bb["xlen"], bb["ylen"], bb["zlen"]])
+    part_thickness = bbox_dims[0]  # smallest dimension
+
     # For each normal direction, find faces at different depths = potential pockets/steps
     pocket_candidates = []
     for n_key, face_group in normal_groups.items():
@@ -571,34 +668,73 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
         sample_n = face_group[0]["normal"]
         proj_axis = max(range(3), key=lambda i: abs(sample_n[i]))
 
-        # Group by depth along the projection axis
+        # Group by depth along the projection axis (coarser rounding for grouping)
         depth_groups = defaultdict(list)
         for fg in face_group:
-            depth = round(fg["center"][proj_axis], 1)
+            depth = round(fg["center"][proj_axis], 0)  # 1mm tolerance for same depth
             depth_groups[depth].append(fg)
 
         # The outermost depth (highest absolute value along axis) = top face
         # Inner depths = pocket floors
         if len(depth_groups) > 1:
             depths = sorted(depth_groups.keys())
-            # Consider non-largest faces at inner depths as pockets
             outer_depth = depths[-1] if sample_n[proj_axis] > 0 else depths[0]
             for d in depths:
                 if d == outer_depth:
                     continue
-                for fg in depth_groups[d]:
+                faces_at_depth = depth_groups[d]
+                # Cluster faces at this depth by proximity to form distinct pockets
+                # Each cluster = one physical pocket
+                clusters = []
+                assigned = [False] * len(faces_at_depth)
+                for i_f, fg in enumerate(faces_at_depth):
+                    if assigned[i_f]:
+                        continue
+                    if fg["area"] < 10:  # Skip tiny faces
+                        assigned[i_f] = True
+                        continue
+                    # Start a new cluster with this face
+                    cluster_faces = [fg]
+                    assigned[i_f] = True
+                    # Find all nearby faces at this depth
+                    changed = True
+                    while changed:
+                        changed = False
+                        for j_f, fg2 in enumerate(faces_at_depth):
+                            if assigned[j_f] or fg2["area"] < 10:
+                                continue
+                            # Check if close to any face already in cluster
+                            for cf in cluster_faces:
+                                if math.dist(cf["center"], fg2["center"]) < 50.0:  # 50mm cluster radius
+                                    cluster_faces.append(fg2)
+                                    assigned[j_f] = True
+                                    changed = True
+                                    break
+                    # Merge cluster into one pocket
+                    total_area = sum(cf["area"] for cf in cluster_faces)
+                    avg_center = tuple(
+                        sum(cf["center"][ax] * cf["area"] for cf in cluster_faces) / total_area
+                        for ax in range(3)
+                    )
                     pocket_depth = abs(outer_depth - d)
-                    if pocket_depth > 0.5 and fg["area"] > 10:  # Meaningful pocket
-                        pocket_candidates.append({
+                    # Skip if depth exceeds part thickness (it's a profile edge, not a pocket)
+                    if pocket_depth > part_thickness * 1.2:
+                        continue
+                    if pocket_depth > 0.5 and total_area > 10:
+                        clusters.append({
                             "type": "pocket",
                             "depth_mm": round(pocket_depth, 2),
                             "depth_in": round(pocket_depth / 25.4, 3),
-                            "area_mm2": round(fg["area"], 1),
-                            "center": fg["center"],
-                            "confidence": "medium"
+                            "area_mm2": round(total_area, 1),
+                            "center": avg_center,
+                            "proj_axis": proj_axis,
+                            "confidence": "medium",
+                            "face_count": len(cluster_faces),
                         })
+                pocket_candidates.extend(clusters)
 
-    # Deduplicate pockets by proximity
+    # Deduplicate pockets by 2D proximity (ignoring depth axis)
+    # This merges duplicate detections from opposite normals (e.g. top vs bottom of plate)
     used = set()
     for i, p in enumerate(pocket_candidates):
         if i in used:
@@ -606,11 +742,21 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
         for j in range(i + 1, len(pocket_candidates)):
             if j in used:
                 continue
-            if math.dist(p["center"], pocket_candidates[j]["center"]) < 5.0:
+            pj = pocket_candidates[j]
+            # Compare using 2D distance on axes perpendicular to depth
+            ax = p["proj_axis"]
+            other_axes = [a for a in range(3) if a != ax]
+            dist_2d = math.sqrt(
+                (p["center"][other_axes[0]] - pj["center"][other_axes[0]])**2 +
+                (p["center"][other_axes[1]] - pj["center"][other_axes[1]])**2
+            )
+            if dist_2d < 15.0:
                 # Merge: keep larger
-                if pocket_candidates[j]["area_mm2"] > p["area_mm2"]:
-                    p.update(pocket_candidates[j])
+                if pj["area_mm2"] > p["area_mm2"]:
+                    p.update(pj)
                 used.add(j)
+        # Remove internal tracking field before appending
+        p.pop("proj_axis", None)
         features.append(p)
 
     # --- Slots: partial cylindrical faces (arcs < 360) that aren't bend faces ---
@@ -620,7 +766,7 @@ def analyze_machined_features(shape, faces_list, planar, cyl, other, envelope):
         except Exception:
             continue
         if 10 < info["u_sweep_deg"] < 350:
-            # Partial cylinder â could be a slot end or fillet
+            # Partial cylinder — could be a slot end or fillet
             if info["radius"] < 20 and info["v_len"] > 1.0:
                 features.append({
                     "type": "slot_or_fillet",
@@ -731,6 +877,11 @@ def detect_bend_faces(cyl, thickness_hint=None):
         r_in, r_out = min(radii), max(radii)
         angle = max(info["u_sweep_deg"] for _, info in group)
         axis = group[0][1]["axis"]
+        # Bend line length = cylinder length along its axis (v_len)
+        bend_line_length = max(info["v_len"] for _, info in group)
+        # Bend center location
+        locs = [info["loc"] for _, info in group]
+        bend_center = tuple(sum(c[k] for c in locs) / len(locs) for k in range(3))
         bend_lines.append({
             "inner_radius": r_in,
             "outer_radius": r_out,
@@ -738,7 +889,20 @@ def detect_bend_faces(cyl, thickness_hint=None):
             "angle_deg": angle,
             "axis": axis,
             "face_idx": [i for i, _ in group],
+            "bend_line_length_mm": bend_line_length,
+            "center": bend_center,
         })
+
+    # Filter out false bends: groups where inner == outer radius (thickness ~ 0)
+    # are standalone cylinders or same-radius pairs, not real inner/outer bend pairs.
+    # Keep only bends with measurable thickness (> 0.5mm).
+    real_bends = [b for b in bend_lines if b["thickness"] > 0.5]
+    if not real_bends and bend_lines:
+        # All bends have zero thickness -- fallback: use the original list
+        # and estimate thickness from the smallest cylinder v_len
+        real_bends = bend_lines
+    else:
+        bend_lines = real_bends
 
     thickness_mm = sum(b["thickness"] for b in bend_lines) / len(bend_lines) if bend_lines else thickness_est
     bend_radius_mm = sum(b["inner_radius"] for b in bend_lines) / len(bend_lines) if bend_lines else None
@@ -924,10 +1088,13 @@ def find_feature_faces(shape, bend_face_idxs, small_area_thresh=45):
             # blends or tiny fillets, never standalone features.
             if sweep_deg < 45:
                 continue
+            # Store cylinder axis direction for flange-aware dedup
+            cyl_ax = cylg.Axis().Direction()
             candidates.append({"idx": i, "center": (ctr.x, ctr.y, ctr.z),
                                 "bbox": (bb.xlen, bb.ylen, bb.zlen), "area": area,
                                 "kind": "cyl", "radius": r,
-                                "u_sweep": sweep_deg})
+                                "u_sweep": sweep_deg,
+                                "cyl_axis": (cyl_ax.X(), cyl_ax.Y(), cyl_ax.Z())})
     return candidates
 
 
@@ -946,12 +1113,26 @@ def cluster_features(candidates, thresh=12.0):
     for i in range(n):
         for j in range(i + 1, n):
             d = math.dist(candidates[i]["center"], candidates[j]["center"])
+            ci, cj = candidates[i], candidates[j]
+
+            # GUARD 3: A full-circle cylinder (sweep > 300 deg) is already a
+            # complete hole bore wall.  It NEVER merges with any other face.
+            # This prevents transitive bridging where separate holes merge
+            # through shared planar faces via Union-Find (hole A -> planar X
+            # -> planar Y -> hole B).  Guards 1 & 2 (now replaced) only
+            # blocked direct cyl-cyl and limited cyl-planar distance, but
+            # planar-planar bridges were unchecked.  Making full-circle cyls
+            # fully standalone eliminates all transitive paths.
+            ci_full = ci["kind"] == "cyl" and ci.get("u_sweep", 0) > 300
+            cj_full = cj["kind"] == "cyl" and cj.get("u_sweep", 0) > 300
+            if ci_full or cj_full:
+                continue
+
             # For two cylindrical faces with matching radii (split-circle halves),
             # allow larger clustering distance proportional to the radius.
             # This catches large holes split into 2x180-deg halves whose face
             # centers are ~(4/pi)*r apart -- much farther than 12mm for big holes.
             eff_thresh = thresh
-            ci, cj = candidates[i], candidates[j]
             if ci["kind"] == "cyl" and cj["kind"] == "cyl":
                 r_spread = abs(ci["radius"] - cj["radius"])
                 if r_spread < 1.0:
@@ -979,7 +1160,7 @@ def merge_slot_pairs(clusters):
             cy = sum(c["center"][1] for c in cyls) / len(cyls)
             cz = sum(c["center"][2] for c in cyls) / len(cyls)
             cyl_only.append({"r": r, "center": (cx, cy, cz), "used": False, "orig": m,
-                                 "avg_sweep": avg_sweep, "total_sweep": total_sweep})
+                             "avg_sweep": avg_sweep, "total_sweep": total_sweep})
         else:
             remaining.append(m)
     slots = []
@@ -999,7 +1180,11 @@ def merge_slot_pairs(clusters):
                 continue
             d = math.dist(a["center"], b["center"])
             if 2*a["r"] < d < 200.0:
-                # Skip if both are full circles (standalone holes, not slot end caps)
+                # Skip if both clusters are full circles (standalone holes, not slot end caps).
+                # total_sweep sums all face sweeps in the cluster:
+                #   - Round hole as 2x180 halves -> total_sweep=360 (full circle)
+                #   - Round hole as single 360 cyl -> total_sweep=360
+                #   - Real slot end cap (single 180 semicircle) -> total_sweep=180
                 if a.get("total_sweep", 360) > 300 and b.get("total_sweep", 360) > 300:
                     continue
                 diffs = sorted(abs(a["center"][k]-b["center"][k]) for k in range(3))
@@ -1022,8 +1207,8 @@ def classify_cluster(members):
     """
     Classify a cluster of faces as a feature type.
 
-    Key distinction: cylindrical faces with ~360Â° sweep = round holes,
-    cylindrical faces with small sweep (~90Â°) alongside planar faces = corner
+    Key distinction: cylindrical faces with ~360° sweep = round holes,
+    cylindrical faces with small sweep (~90°) alongside planar faces = corner
     fillets of a square/rectangular hole.
     """
     planars = [m for m in members if m["kind"] == "planar"]
@@ -1049,8 +1234,13 @@ def classify_cluster(members):
             if r_avg * 2 / 25.4 < 0.08:
                 return None
             dia_in = 2 * r_avg / 25.4
-            return {"type": "round",
+            feat = {"type": "round",
                     "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+            # Store representative axis direction for flange-aware dedup
+            axes = [c.get("cyl_axis") for c in full_circle_cyls if c.get("cyl_axis")]
+            if axes:
+                feat["_hole_axis"] = axes[0]
+            return feat
 
         # Case 1b: Partial cyls that are large arcs (>=140 deg, i.e. semicircles)
         # forming a full circle, even when mixed with planar faces.
@@ -1065,9 +1255,13 @@ def classify_cluster(members):
                     r_avg = sum(radii_la) / len(radii_la)
                     if r_avg * 2 / 25.4 >= 0.08:
                         dia_in = 2 * r_avg / 25.4
-                        return {"type": "round",
+                        feat = {"type": "round",
                                 "diameter_in": round(dia_in, 3),
                                 "center": (cx, cy, cz), "confidence": "high"}
+                        axes = [c.get("cyl_axis") for c in large_arcs if c.get("cyl_axis")]
+                        if axes:
+                            feat["_hole_axis"] = axes[0]
+                        return feat
 
         # Case 2: Only partial arcs (corner fillets) + planar faces = SQUARE/RECT hole
         if partial_cyls and n_planar >= 2:
@@ -1078,17 +1272,24 @@ def classify_cluster(members):
             d1, d2 = dims[0], dims[1]
             if d1 < 1.5 or d2 < 1.5:
                 return None
-            return {"type": "square_or_rect",
+            # High aspect ratio = edge notch/relief, not a hole — filter out
+            if d2 > 0 and d1 / d2 > 4:
+                return None
+            feat = {"type": "square_or_rect",
                     "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                     "center": (cx, cy, cz), "confidence": "high"}
+            axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+            if axes:
+                feat["_hole_axis"] = axes[0]
+            return feat
 
-        # Case 3: Partial arcs without enough planars â likely corner fillets
+        # Case 3: Partial arcs without enough planars — likely corner fillets
         # that didn't cluster with their planar walls. Check if they form
-        # a rectangular pattern (4 corners at ~90Â° each)
+        # a rectangular pattern (4 corners at ~90° each)
         if partial_cyls and len(partial_cyls) >= 4 and n_planar == 0:
             avg_sweep = sum(c["u_sweep"] for c in partial_cyls) / len(partial_cyls)
-            if 70 < avg_sweep < 110:  # ~90Â° corner fillets
-                # First check: if total sweep ~360 and all radii match,
+            if 70 < avg_sweep < 110:  # ~90° corner fillets
+                # First check: if total sweep ~360° and all radii match,
                 # this is a round hole split into quadrants, not a rect cutout
                 total_sw = sum(c["u_sweep"] for c in partial_cyls)
                 radii_pc = [c["radius"] for c in partial_cyls]
@@ -1097,16 +1298,27 @@ def classify_cluster(members):
                     r_avg = sum(radii_pc) / len(radii_pc)
                     if r_avg * 2 / 25.4 >= 0.08:
                         dia_in = 2 * r_avg / 25.4
-                        return {"type": "round",
+                        feat = {"type": "round",
                                 "diameter_in": round(dia_in, 3), "center": (cx, cy, cz),
                                 "confidence": "medium"}
+                        axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+                        if axes:
+                            feat["_hole_axis"] = axes[0]
+                        return feat
                 xl, yl, zl = spread
                 dims = sorted([xl, yl, zl], reverse=True)
                 d1, d2 = dims[0], dims[1]
                 if d1 >= 1.5 and d2 >= 1.5:
-                    return {"type": "square_or_rect",
+                    # High aspect ratio = edge notch/relief — filter out
+                    if d2 > 0 and d1 / d2 > 4:
+                        return None
+                    feat = {"type": "square_or_rect",
                             "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                             "center": (cx, cy, cz), "confidence": "medium"}
+                    axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+                    if axes:
+                        feat["_hole_axis"] = axes[0]
+                    return feat
 
         # Case 3b: Multiple partial cylinders whose sweeps sum to ~360°
         # = round hole split into segments by the CAD kernel (e.g. two 180° halves)
@@ -1119,20 +1331,28 @@ def classify_cluster(members):
                 if r_avg * 2 / 25.4 < 0.08:
                     return None
                 dia_in = 2 * r_avg / 25.4
-                return {"type": "round",
+                feat = {"type": "round",
                         "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "high"}
+                axes = [c.get("cyl_axis") for c in partial_cyls if c.get("cyl_axis")]
+                if axes:
+                    feat["_hole_axis"] = axes[0]
+                return feat
 
-        # Case 4: Mixed or ambiguous â fall back to checking if it's round
+        # Case 4: Mixed or ambiguous — fall back to checking if it's round
         if full_circle_cyls:
             radii = [c["radius"] for c in full_circle_cyls]
             r_avg = sum(radii) / len(radii)
             if r_avg * 2 / 25.4 < 0.08:
                 return None
             dia_in = 2 * r_avg / 25.4
-            return {"type": "round",
+            feat = {"type": "round",
                     "diameter_in": round(dia_in, 3), "center": (cx, cy, cz), "confidence": "medium"}
+            axes = [c.get("cyl_axis") for c in full_circle_cyls if c.get("cyl_axis")]
+            if axes:
+                feat["_hole_axis"] = axes[0]
+            return feat
 
-        # Partial cyls only, few of them â likely edge fillets, not a feature
+        # Partial cyls only, few of them — likely edge fillets, not a feature
         if len(partial_cyls) <= 2 and n_planar == 0:
             return None
 
@@ -1151,10 +1371,15 @@ def classify_cluster(members):
         d1, d2 = dims[0], dims[1]
         if d1 < 1.5 or d2 < 1.5:
             return None
+        # High aspect ratio = edge notch/relief — filter out
+        if d2 > 0 and d1 / d2 > 4:
+            return None
         return {"type": "square_or_rect", "size_in": (round(d1/25.4, 3), round(d2/25.4, 3)),
                 "center": (cx, cy, cz), "confidence": "high"}
 
 
+# ==========================================================================
+# COMPLEXITY SCORING
 # ==========================================================================
 def _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thickness_mm):
     """
@@ -1223,8 +1448,137 @@ def _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thi
 
 
 # ==========================================================================
-# 5. MAIN DRIVER â unified entry point
+# 5. MAIN DRIVER — unified entry point
 # ==========================================================================
+def run_surface_model(shape, envelope, planar, cyl, other, k_factor, material="steel"):
+    """Analysis path for surface-only STEP files (no solid body)."""
+    bb = envelope["bbox_mm"]
+    dims = sorted([bb["xlen"], bb["ylen"], bb["zlen"]])
+
+    # Try to detect thickness from parallel planar face pairs
+    thickness_mm = dims[0]  # default: thinnest bounding box dimension
+    if planar:
+        # Look for pairs of parallel planar faces at similar distance
+        normals_dists = []
+        for i, f, s in planar:
+            try:
+                plane = s.Plane()
+                loc = plane.Location()
+                d = plane.Axis().Direction()
+                normals_dists.append((i, (d.X(), d.Y(), d.Z()),
+                                      loc.X()*d.X() + loc.Y()*d.Y() + loc.Z()*d.Z()))
+            except Exception:
+                pass
+        # Find min distance between anti-parallel face pairs
+        best_thick = None
+        for a_idx in range(len(normals_dists)):
+            for b_idx in range(a_idx+1, len(normals_dists)):
+                _, na, da = normals_dists[a_idx]
+                _, nb, db = normals_dists[b_idx]
+                dot = na[0]*nb[0] + na[1]*nb[1] + na[2]*nb[2]
+                if abs(dot + 1.0) < 0.05:  # anti-parallel (opposing faces)
+                    gap = abs(da - db)
+                    if 0.1 < gap < 30.0:  # reasonable sheet metal thickness range
+                        if best_thick is None or gap < best_thick:
+                            best_thick = gap
+        if best_thick:
+            thickness_mm = best_thick
+
+    thickness_in = thickness_mm / 25.4
+
+    # Detect cylindrical features (holes, bends)
+    from collections import defaultdict as _dd
+    cyl_infos = []
+    for i, f, s in cyl:
+        try:
+            cyl_infos.append((i, cyl_face_info(f, s)))
+        except Exception:
+            pass
+
+    # Separate bends from holes based on v_len vs radius
+    bend_candidates = []
+    hole_candidates = []
+    for i, info in cyl_infos:
+        r_mm = info["radius"]
+        sweep = info["sweep_deg"]
+        v_len = info["v_len"]
+        if v_len > 5 * r_mm and sweep > 60:
+            bend_candidates.append(info)
+        elif sweep > 300:
+            # Full circle = hole
+            hole_candidates.append({
+                "type": "round",
+                "diameter_mm": r_mm * 2,
+                "diameter_in": r_mm * 2 / 25.4,
+            })
+
+    # Count unique holes by diameter
+    hole_diameters = defaultdict(int)
+    for h in hole_candidates:
+        key = round(h["diameter_mm"], 1)
+        hole_diameters[key] += 1
+
+    features = []
+    for d_mm, count in hole_diameters.items():
+        features.append({
+            "type": "round",
+            "diameter_mm": d_mm,
+            "diameter_in": d_mm / 25.4,
+            "count": count,
+        })
+
+    thickness_in = round(thickness_in, 4)
+
+    # Estimate flat dimensions
+    flat_width_mm = dims[1] + dims[2]  # rough unfolded estimate
+    flat_length_mm = max(dims[1], dims[2])
+    flat_width_in = round(flat_width_mm / 25.4, 3)
+    flat_length_in = round(flat_length_mm / 25.4, 3)
+
+    # Gauge detection
+    gauge_str = ""
+    gauge_map = {
+        0.030: "22 ga", 0.036: "20 ga", 0.048: "18 ga", 0.060: "16 ga",
+        0.075: "14 ga", 0.105: "12 ga", 0.120: "11 ga", 0.135: "10 ga",
+        0.188: "3/16\"", 0.250: "1/4\"", 0.375: "3/8\"", 0.500: "1/2\"",
+    }
+    best_gauge_diff = 999
+    for g_in, g_str in gauge_map.items():
+        diff = abs(thickness_in - g_in)
+        if diff < best_gauge_diff:
+            best_gauge_diff = diff
+            gauge_str = g_str
+
+    return {
+        "is_surface_model": True,
+        "surface_analysis_note": "This file contains surfaces/wireframes without solid geometry. "
+                                 "Dimensions and features were extracted from surface data. "
+                                 "Volume and weight are estimates.",
+        "thickness_mm": thickness_mm,
+        "thickness_in": thickness_in,
+        "gauge": gauge_str if best_gauge_diff < 0.015 else None,
+        "gauge_nominal_in": None,
+        "bend_radius_in": None,
+        "num_bends": len(bend_candidates),
+        "bend_angles_deg": [],
+        "bend_details": [],
+        "k_factor_assumed": None,
+        "k_factor_source": "surface model",
+        "flat_width_mm": flat_width_mm,
+        "flat_width_in": flat_width_in,
+        "flat_length_mm": flat_length_mm,
+        "flat_length_in": flat_length_in,
+        "num_features": len(features),
+        "features": features,
+        "feature_summary": {
+            "round_holes": sum(f["count"] for f in features if f["type"] == "round"),
+            "total": sum(f["count"] for f in features),
+        },
+        "flat_layout": [],
+        "processes": ["Laser/Punch", "Deburr"],
+    }
+
+
 def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json", material="steel"):
     try:
         shape, solid = load_step(step_path)
@@ -1234,7 +1588,7 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json",
     except Exception as e:
         raise ValueError(f"Failed to load STEP file: {e}")
 
-    envelope = get_envelope(solid, density)
+    envelope = get_envelope(solid, density, shape=shape)
 
     try:
         faces_list, planar, cyl, other = classify_faces(shape)
@@ -1242,6 +1596,34 @@ def run(step_path, density=7.9, k_factor=0.44, out_json="geometry_extract.json",
         print(f"Warning: Face classification failed: {e}")
         faces_list, planar, cyl, other = [], [], [], []
 
+    # --- Surface-only model (no solid body) ---
+    if solid is None:
+        result = {
+            "source_file": step_path,
+            "fab_type": "sheet_metal",
+            "fab_type_confidence": "low",
+            "fab_sub_type": None,
+            "classification_reasons": ["surface_model_no_solid"],
+            "envelope": envelope,
+            "face_counts": {
+                "planar": len(planar),
+                "cylindrical": len(cyl),
+                "other": len(other),
+                "total": len(planar) + len(cyl) + len(other),
+            },
+        }
+        try:
+            result.update(run_surface_model(shape, envelope, planar, cyl, other, k_factor, material))
+        except Exception as e:
+            print(f"Warning: Surface analysis failed: {e}")
+            result["analysis_error"] = str(e)
+            result["is_surface_model"] = True
+
+        with open(out_json, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        return result
+
+    # --- Normal solid-body analysis ---
     # --- Auto-classify fab type ---
     fab_type, confidence, sub_type, reasons = classify_fab_type(
         shape, solid, envelope, planar, cyl, other)
@@ -1291,43 +1673,90 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     looked_up_k, matched_br, k_source = lookup_k_factor(thickness_in, bend_radius_in, material)
     k_factor = looked_up_k  # override default with table value
 
-    axis_dir = dominant_bend_axis(bend_lines) if bend_lines else (1, 0, 0)
     bb = envelope["bbox_mm"]
     center = ((bb["xmin"]+bb["xmax"])/2, (bb["ymin"]+bb["ymax"])/2, (bb["zmin"]+bb["zmax"])/2)
+    env_dims_mm = [bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"], bb["zmax"]-bb["zmin"]]
+    max_env_mm = max(env_dims_mm)
 
-    # Multi-cut: try several cross-section positions along the bend axis
-    # to avoid cutting through holes/slots which fragment the profile.
-    def _proj_axis(pt):
-        return sum(pt[k]*axis_dir[k] for k in range(3))
+    # Collect all unique bend axis directions to try
+    axes_to_try = []
+    if bend_lines:
+        # Start with dominant axis
+        dom_axis = dominant_bend_axis(bend_lines)
+        axes_to_try.append(dom_axis)
+        # Collect other unique axes
+        seen_keys = set()
+        seen_keys.add(tuple(round(abs(c), 1) for c in dom_axis))
+        for b in bend_lines:
+            key = tuple(round(abs(c), 1) for c in b["axis"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                axes_to_try.append(b["axis"])
+    else:
+        axes_to_try = [(1, 0, 0)]
 
-    proj_center = _proj_axis(center)
-    corners_bb = [(bb["xmin"] if i&1 else bb["xmax"],
-                   bb["ymin"] if i&2 else bb["ymax"],
-                   bb["zmin"] if i&4 else bb["zmax"]) for i in range(8)]
-    proj_min_bb = min(_proj_axis(c) for c in corners_bb)
-    proj_max_bb = max(_proj_axis(c) for c in corners_bb)
-    axis_span = proj_max_bb - proj_min_bb
-
+    # Multi-cut across all axes: try several cross-section positions along each
+    # bend axis to find the one that gives the largest developed width.
     best_layout, best_flat_width_mm = [], 0.0
     best_cut_point = center
-    for frac in [0.05, 0.15, 0.25, 0.5, 0.75, 0.85, 0.95]:
-        offset = proj_min_bb + frac * axis_span - proj_center
-        cp = tuple(center[k] + offset * axis_dir[k] for k in range(3))
-        try:
-            edges = cut_cross_section(solid, axis_dir, cp)
-            edges_info = [edge_2d_info(e, axis_dir) for e in edges]
-            chain = walk_closed_loop(edges_info, thickness_mm)
-            layout_candidate, fw = build_flat_layout(
-                chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
-            if fw > best_flat_width_mm:
-                best_flat_width_mm = fw
-                best_layout = layout_candidate
-                best_cut_point = cp
-        except Exception:
-            pass
+    axis_dir = axes_to_try[0]  # default
+
+    for try_axis in axes_to_try:
+        def _proj_axis(pt, ax=try_axis):
+            return sum(pt[k]*ax[k] for k in range(3))
+
+        proj_center = _proj_axis(center)
+        corners_bb = [(bb["xmin"] if i&1 else bb["xmax"],
+                       bb["ymin"] if i&2 else bb["ymax"],
+                       bb["zmin"] if i&4 else bb["zmax"]) for i in range(8)]
+        proj_min_bb = min(_proj_axis(c) for c in corners_bb)
+        proj_max_bb = max(_proj_axis(c) for c in corners_bb)
+        axis_span = proj_max_bb - proj_min_bb
+        if axis_span < 1e-6:
+            continue
+
+        for frac in [0.05, 0.15, 0.25, 0.5, 0.75, 0.85, 0.95]:
+            offset = proj_min_bb + frac * axis_span - proj_center
+            cp = tuple(center[k] + offset * try_axis[k] for k in range(3))
+            try:
+                edges = cut_cross_section(solid, try_axis, cp)
+                edges_info = [edge_2d_info(e, try_axis) for e in edges]
+                chain = walk_closed_loop(edges_info, thickness_mm)
+                layout_candidate, fw = build_flat_layout(
+                    chain, bend_radius_mm or thickness_mm, thickness_mm, k_factor)
+                if fw > best_flat_width_mm:
+                    best_flat_width_mm = fw
+                    best_layout = layout_candidate
+                    best_cut_point = cp
+                    axis_dir = try_axis
+            except Exception:
+                pass
 
     layout, flat_width_mm = best_layout, best_flat_width_mm
     cut_point = best_cut_point
+
+    # Fallback: if cross-section walk gives unreasonably small result,
+    # estimate flat width from envelope + bend deductions
+    if flat_width_mm < max_env_mm * 0.7 and bend_lines:
+        print(f"Warning: Cross-section flat width {flat_width_mm:.1f}mm < 70% of envelope {max_env_mm:.1f}mm, using bend deduction estimate")
+        # Estimate: sum the two largest envelope dims (unfolded flanges) minus bend deductions
+        sorted_dims = sorted(env_dims_mm, reverse=True)
+        total_bd = 0.0
+        br_mm = bend_radius_mm or thickness_mm
+        for b in bend_lines:
+            angle_rad = math.radians(b["angle_deg"])
+            ba = (br_mm + k_factor * thickness_mm) * angle_rad
+            ossb = (br_mm + thickness_mm) * math.tan(angle_rad / 2) if angle_rad < math.pi else 0
+            total_bd += 2 * ossb - ba  # bend deduction per bend
+        # Flat width ~ largest dim + second largest dim - total bend deductions
+        # (rough estimate assuming flanges fold from the two larger dimensions)
+        est_mm = sorted_dims[0] + sorted_dims[2] * 2 - total_bd
+        if est_mm > flat_width_mm:
+            flat_width_mm = est_mm
+            # Build a simple layout with flat segments and bend placeholders
+            layout = [{"kind": "flat", "start": 0, "end": flat_width_mm,
+                       "p0": (0, 0), "p1": (flat_width_mm, 0)}]
+
     if flat_width_mm == 0.0:
         print("Warning: All cross-section cuts failed for flat layout")
 
@@ -1346,8 +1775,11 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         v_axis = norm3(cross(ax, u_axis))
         return (sum(p3d[k]*u_axis[k] for k in range(3)), sum(p3d[k]*v_axis[k] for k in range(3)))
 
+    _transverse_miss_log = []  # collect diagnostic info for first few misses
+
     def transverse_pos_mm(y_z):
         best = None
+        perp_tol = max(thickness_mm, 3.0) + 2.0  # increased from +1.0 for robustness
         for seg in layout:
             if seg["kind"] != "flat":
                 continue
@@ -1357,11 +1789,27 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             tproj = v[0]*d[0] + v[1]*d[1]
             perp = abs(v[0]*d[1] - v[1]*d[0])
             seglen = seg["end"] - seg["start"]
-            perp_tol = max(thickness_mm, 3.0) + 1.0
             if -3 <= tproj <= seglen+3 and perp < perp_tol:
                 cand = seg["start"] + max(0, min(seglen, tproj))
                 if best is None or perp < best[1]:
                     best = (cand, perp)
+        if best is None and len(_transverse_miss_log) < 3:
+            # Log diagnostic info for the first few misses
+            seg_info = []
+            for seg in layout:
+                if seg["kind"] != "flat":
+                    continue
+                p0, p1 = seg["p0"], seg["p1"]
+                d = norm2((p1[0]-p0[0], p1[1]-p0[1]))
+                v = (y_z[0]-p0[0], y_z[1]-p0[1])
+                tproj = v[0]*d[0] + v[1]*d[1]
+                perp = abs(v[0]*d[1] - v[1]*d[0])
+                seglen = seg["end"] - seg["start"]
+                seg_info.append({"seglen": round(seglen, 1),
+                                 "tproj": round(tproj, 1), "perp": round(perp, 1),
+                                 "perp_tol": round(perp_tol, 1)})
+            _transverse_miss_log.append({"hole_2d": (round(y_z[0], 1), round(y_z[1], 1)),
+                                         "segs": seg_info})
         return best[0] if best else None
 
     corners = [(bb["xmin"] if i&1 else bb["xmax"],
@@ -1382,8 +1830,60 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
     clusters = cluster_features(candidates)
     slot_features, remaining_clusters = merge_slot_pairs(clusters)
     classified = [classify_cluster(m) for m in remaining_clusters if len(m) > 0]
-    features = slot_features + [c for c in classified if c is not None]
+    features_raw = slot_features + [c for c in classified if c is not None]
     unclassified_count = sum(1 for c in classified if c is None)
+
+    # --- Filter out bend reliefs and edge notches ---
+    # Features whose smallest dimension is <= sheet thickness are almost certainly
+    # bend relief cuts, not actual holes.  Also filter features smaller than a
+    # practical minimum (3mm in any dimension) regardless of thickness.
+    _bend_relief_filtered = 0
+    features = []
+    for f in features_raw:
+        if f["type"] == "square_or_rect":
+            dims_mm = sorted([f["size_in"][0] * 25.4, f["size_in"][1] * 25.4])
+            min_dim_mm = dims_mm[0]
+            # If smaller dimension is <= thickness, it's a bend relief
+            if min_dim_mm <= thickness_mm * 1.2:
+                _bend_relief_filtered += 1
+                continue
+            # Absolute minimum: skip features smaller than 3mm in any dimension
+            if min_dim_mm < 3.0:
+                _bend_relief_filtered += 1
+                continue
+        elif f["type"] == "round":
+            dia_mm = f.get("diameter_in", 0) * 25.4
+            # Round holes smaller than thickness are likely edge blend artifacts
+            if dia_mm <= thickness_mm * 0.8:
+                _bend_relief_filtered += 1
+                continue
+        features.append(f)
+    if _bend_relief_filtered:
+        print(f"[DEBUG] Filtered {_bend_relief_filtered} bend relief / edge notch false positives (thickness={thickness_mm:.2f}mm)", flush=True)
+
+    # --- DEBUG: feature pipeline stats ---
+    _cyl_cands = [c for c in candidates if c["kind"] == "cyl"]
+    _plan_cands = [c for c in candidates if c["kind"] == "planar"]
+    _cyl_radii = {}
+    for c in _cyl_cands:
+        r_key = round(c["radius"], 3)
+        _cyl_radii[r_key] = _cyl_radii.get(r_key, 0) + 1
+    _cluster_sizes = [len(cl) for cl in clusters]
+    _remaining_sizes = [len(cl) for cl in remaining_clusters]
+    _debug_info = {
+        "candidates_total": len(candidates),
+        "candidates_cyl": len(_cyl_cands),
+        "candidates_planar": len(_plan_cands),
+        "cyl_radii_breakdown": {str(k): v for k, v in sorted(_cyl_radii.items())},
+        "num_clusters": len(clusters),
+        "cluster_sizes_top20": sorted(_cluster_sizes, reverse=True)[:20],
+        "after_slot_merge": len(remaining_clusters),
+        "num_slots": len(slot_features),
+        "classified_count": len([c for c in classified if c]),
+        "null_count": unclassified_count,
+        "bend_faces_excluded": len(bend_face_idxs),
+    }
+    print(f"[DEBUG] {_debug_info}", flush=True)
 
     for feat in features:
         cx, cy, cz = feat["center"]
@@ -1392,6 +1892,133 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         yz = to_2d((cx, cy, cz))
         t_mm = transverse_pos_mm(yz)
         feat["transverse_in"] = round(t_mm/25.4, 3) if t_mm is not None else None
+
+    # --- Deduplicate features ---
+    # On bent parts, the same physical hole can produce multiple face clusters
+    # that get classified identically.  Merge features with the same type,
+    # matching size (within tolerance), and matching length_in (within 0.1 in).
+    # NOTE: Use coarse 0.1" buckets (round*10/10) instead of 0.05" because
+    # face clusters from the SAME physical hole can measure slightly different
+    # sizes (different faces in each cluster → different size calculation).
+    # Tight buckets cause same-hole duplicates to land in different groups.
+    def _feat_key(f):
+        """Return a coarse key for grouping potential duplicates."""
+        t = f["type"]
+        if t == "round":
+            return (t, round(f.get("diameter_in", 0) * 10) / 10)  # 0.1" buckets
+        elif t in ("square_or_rect", "slot"):
+            s = f.get("size_in", (0, 0))
+            return (t, round(s[0]*10)/10, round(s[1]*10)/10)
+        return (t,)
+
+    # Two-pass dedup: group by (key, rounded_L), then sub-cluster
+    # by transverse position or 2D cross-section proximity.
+    # On bent parts, face clusters from the same hole can be scattered
+    # in 3D space across bend segments.  Using 2D cross-section distance
+    # (perpendicular to the bend axis) eliminates the bending effect and
+    # gives a reliable proximity measure.
+    from collections import defaultdict
+    _groups = defaultdict(list)
+    for f in features:
+        k = _feat_key(f)
+        L_bucket = round((f.get("length_in") or 0) * 5) / 5  # 0.2" buckets
+        _groups[(k, L_bucket)].append(f)
+
+    # Pre-compute 2D cross-section projections for each feature center
+    for f in features:
+        if f.get("center"):
+            f["_2d"] = to_2d(f["center"])
+        else:
+            f["_2d"] = None
+
+    # Dynamic distance threshold for T=None features:
+    # Use cross-section part width / 2.5 — features from the same hole
+    # project to within a few mm in 2D, while features on opposite flanges
+    # are separated by the full part width (~95mm for this geometry).
+    _bb_dims = sorted([bb["xmax"]-bb["xmin"], bb["ymax"]-bb["ymin"],
+                       bb["zmax"]-bb["zmin"]])
+    # Dedup thresholds:
+    # - Same-flange (parallel axes or no axis info): 5mm.  Same-hole fragments
+    #   project within ~2mm in 2D, so 5mm gives 2.5x safety margin.
+    # - Cross-flange (non-parallel axes, angle > 15 deg): 3mm.  Only true
+    #   bend-split fragments are this close; distinct holes on adjacent flanges
+    #   are further apart.  This prevents the PX04-style false merges permanently.
+    _DEDUP_SAME_FLANGE = 5.0
+    _DEDUP_CROSS_FLANGE = 3.0
+
+    def _axes_parallel(a1, a2, tol_deg=15):
+        """Check if two axis vectors are parallel (within tol_deg)."""
+        if a1 is None or a2 is None:
+            return True  # unknown = assume same flange (conservative)
+        dot = abs(sum(a1[k]*a2[k] for k in range(3)))
+        # dot = |cos(angle)|; cos(15 deg) ~ 0.966
+        return dot > math.cos(math.radians(tol_deg))
+
+    deduped = []
+    for (_gk, _gL), members in _groups.items():
+        if len(members) == 1:
+            deduped.append(members[0])
+            continue
+        # Sub-cluster members by spatial proximity
+        sub_clusters = []
+        for f in members:
+            placed = False
+            for ci, cluster in enumerate(sub_clusters):
+                # Check if f matches ANY member of this cluster
+                for rep in cluster:
+                    if f.get("transverse_in") is not None and rep.get("transverse_in") is not None:
+                        if abs(f["transverse_in"] - rep["transverse_in"]) < 0.1:
+                            cluster.append(f)
+                            placed = True
+                            break
+                    else:
+                        # Use 2D cross-section distance instead of 3D
+                        if f.get("_2d") and rep.get("_2d"):
+                            d = math.dist(f["_2d"], rep["_2d"])
+                        else:
+                            d = 999
+                        # Flange-aware threshold: tighter for cross-flange pairs
+                        parallel = _axes_parallel(f.get("_hole_axis"), rep.get("_hole_axis"))
+                        thresh = _DEDUP_SAME_FLANGE if parallel else _DEDUP_CROSS_FLANGE
+                        if d < thresh:
+                            cluster.append(f)
+                            placed = True
+                            break
+                if placed:
+                    break
+            if not placed:
+                sub_clusters.append([f])
+        # Bend-fragmentation check: if >2 T=None members share the same
+        # first 2D component (cross-section width position), they are almost
+        # certainly face fragments of ONE hole split across bend segments.
+        # Force-merge them.  (2 members could be opposite-side holes, so
+        # we leave those to the 2D distance check above.)
+        if len(sub_clusters) > 2 and len(sub_clusters) == len(members):
+            all_t_none = all(m.get("transverse_in") is None for m in members)
+            all_have_2d = all(m.get("_2d") is not None for m in members)
+            if all_t_none and all_have_2d:
+                u_vals = [m["_2d"][0] for m in members]
+                u_spread = max(u_vals) - min(u_vals)
+                if u_spread < 2.0:  # within 2mm in cross-section width
+                    sub_clusters = [members]
+
+        # Keep one representative from each sub-cluster
+        for cluster in sub_clusters:
+            deduped.append(cluster[0])
+    # Clean up temp keys
+    for f in deduped:
+        f.pop("_2d", None)
+        f.pop("_hole_axis", None)
+    _debug_info["pre_dedup_count"] = _debug_info["classified_count"] + _debug_info["num_slots"]
+    _debug_info["post_dedup_count"] = len(deduped)
+    _debug_info["dedup_thresholds"] = {"same_flange": _DEDUP_SAME_FLANGE,
+                                       "cross_flange": _DEDUP_CROSS_FLANGE}
+    _t_none_count = sum(1 for f in deduped if f.get("transverse_in") is None)
+    _debug_info["transverse_none_count"] = _t_none_count
+    if _transverse_miss_log:
+        _debug_info["transverse_miss_samples"] = _transverse_miss_log
+    _debug_info["layout_segments"] = len([s for s in layout if s["kind"] == "flat"])
+    features = deduped
 
     # --- Gauge auto-detection ---
     gauge_num, gauge_nominal = lookup_gauge(thickness_mm / 25.4, material)
@@ -1449,6 +2076,20 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
         "bend_radius_in": round(bend_radius_mm/25.4, 4) if bend_radius_mm else None,
         "num_bends": len(bend_lines),
         "bend_angles_deg": sorted([round(b["angle_deg"],1) for b in bend_lines]),
+        "bend_details": [
+            {
+                "angle_deg": round(b["angle_deg"], 1),
+                "inner_radius_in": round(b["inner_radius"] / 25.4, 4),
+                "bend_line_length_in": round(b.get("bend_line_length_mm", 0) / 25.4, 3),
+                "axis": [round(c, 3) for c in b["axis"]],
+                "direction": (
+                    "along_length" if abs(b["axis"][0]) > 0.7 else
+                    "along_width" if abs(b["axis"][1]) > 0.7 else
+                    "along_depth" if abs(b["axis"][2]) > 0.7 else "oblique"
+                ),
+            }
+            for b in bend_lines
+        ],
         "k_factor_assumed": k_factor,
         "k_factor_source": k_source,
         "k_factor_matched_bend_radius_in": matched_br,
@@ -1466,6 +2107,12 @@ def run_sheet_metal(shape, solid, envelope, planar, cyl, other_faces, k_factor, 
             ["tapping (check manually)"] if any(f["type"] == "round" and f.get("diameter_in", 1) < 0.5 for f in features) else []
         ),
         "complexity": _compute_complexity(features, bend_lines, flat_width_mm, flat_length_mm, thickness_mm),
+        "nesting": nest_parts(
+            round(flat_width_mm / 25.4, 3) if flat_width_mm > 0 else 0,
+            round(flat_length_mm / 25.4, 3) if flat_length_mm > 0 else 0,
+            1  # default qty=1, frontend can request re-nesting with actual qty
+        ),
+        "_debug": _debug_info,
     }
 
 
@@ -1503,6 +2150,124 @@ def run_machined(shape, solid, envelope, faces_list, planar, cyl, other, machini
         "features_raw_count": len(features),
         "processes": processes,
     }
+
+
+# ==========================================================================
+# MATERIAL NESTING SIMULATION
+# ==========================================================================
+# Standard sheet sizes (width_in x length_in)
+_STANDARD_SHEETS = [
+    (48, 96),    # 4' x 8' (most common)
+    (48, 120),   # 4' x 10'
+    (60, 120),   # 5' x 10'
+    (48, 144),   # 4' x 12'
+    (60, 144),   # 5' x 12'
+]
+
+def nest_parts(flat_w_in, flat_l_in, quantity, sheet_sizes=None, part_gap_in=0.25):
+    """
+    Simple 2D guillotine nesting: pack rectangular flat patterns onto standard sheets.
+    Returns nesting results including utilization, sheets needed, and cost-relevant data.
+
+    part_gap_in: spacing between parts for kerf + handling (default 0.25")
+    """
+    if sheet_sizes is None:
+        sheet_sizes = _STANDARD_SHEETS
+
+    if flat_w_in <= 0 or flat_l_in <= 0 or quantity <= 0:
+        return None
+
+    pw = flat_w_in + part_gap_in
+    pl = flat_l_in + part_gap_in
+
+    best_result = None
+
+    for sw, sl in sheet_sizes:
+        # Try both orientations of the part
+        fits = []
+        for part_w, part_l in [(pw, pl), (pl, pw)]:
+            if part_w > sw or part_l > sl:
+                continue
+            cols = int(sw / part_w)
+            rows = int(sl / part_l)
+            per_sheet = cols * rows
+            if per_sheet > 0:
+                fits.append({
+                    "cols": cols, "rows": rows, "per_sheet": per_sheet,
+                    "part_w": part_w, "part_l": part_l, "rotated": (part_w != pw),
+                })
+
+        if not fits:
+            continue
+
+        best_fit = max(fits, key=lambda f: f["per_sheet"])
+        per_sheet = best_fit["per_sheet"]
+        sheets_needed = math.ceil(quantity / per_sheet)
+        parts_on_last = quantity - (sheets_needed - 1) * per_sheet
+
+        # Utilization calculation
+        part_area = flat_w_in * flat_l_in
+        sheet_area = sw * sl
+        total_part_area = part_area * quantity
+        total_sheet_area = sheet_area * sheets_needed
+        utilization = total_part_area / total_sheet_area if total_sheet_area > 0 else 0
+        scrap_pct = 1.0 - utilization
+
+        # Remnant on last sheet
+        remnant_area = sheet_area - (parts_on_last * part_area)
+
+        result = {
+            "sheet_size_in": f"{sw} x {sl}",
+            "sheet_size_label": f"{sw/12:.0f}' x {sl/12:.0f}'",
+            "sheet_area_sqft": round(sheet_area / 144, 2),
+            "parts_per_sheet": per_sheet,
+            "sheets_needed": sheets_needed,
+            "parts_on_last_sheet": parts_on_last,
+            "utilization_pct": round(utilization * 100, 1),
+            "scrap_pct": round(scrap_pct * 100, 1),
+            "total_sheet_area_sqft": round(total_sheet_area / 144, 2),
+            "total_part_area_sqft": round(total_part_area / 144, 2),
+            "remnant_sqft": round(remnant_area / 144, 2),
+            "layout": {
+                "cols": best_fit["cols"],
+                "rows": best_fit["rows"],
+                "rotated": best_fit["rotated"],
+            },
+            "part_gap_in": part_gap_in,
+        }
+
+        # Pick best: highest utilization
+        if best_result is None or result["utilization_pct"] > best_result["utilization_pct"]:
+            best_result = result
+
+    # Also compute all sheet options for comparison
+    if best_result:
+        all_options = []
+        for sw, sl in sheet_sizes:
+            for part_w, part_l in [(pw, pl), (pl, pw)]:
+                if part_w > sw or part_l > sl:
+                    continue
+                cols = int(sw / part_w)
+                rows = int(sl / part_l)
+                per_sheet = cols * rows
+                if per_sheet > 0:
+                    sn = math.ceil(quantity / per_sheet)
+                    util = (flat_w_in * flat_l_in * quantity) / (sw * sl * sn)
+                    all_options.append({
+                        "sheet": f"{sw/12:.0f}' x {sl/12:.0f}'",
+                        "per_sheet": per_sheet,
+                        "sheets": sn,
+                        "utilization_pct": round(util * 100, 1),
+                    })
+        # Remove duplicates (same sheet, keep best per_sheet)
+        seen = {}
+        for opt in all_options:
+            key = opt["sheet"]
+            if key not in seen or opt["per_sheet"] > seen[key]["per_sheet"]:
+                seen[key] = opt
+        best_result["all_options"] = sorted(seen.values(), key=lambda x: -x["utilization_pct"])
+
+    return best_result
 
 
 if __name__ == "__main__":

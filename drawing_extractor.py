@@ -18,7 +18,22 @@ try:
 except ImportError:
     fitz = None
 
-# ââ Material database ââââââââââââââââââââââââââââââââââââââââââââââââââ
+try:
+    import drawing_layout
+except Exception:  # layout parsing is optional - regex extraction still works
+    drawing_layout = None
+
+try:
+    import iso286
+except Exception:
+    iso286 = None
+
+try:
+    import dxf_reader
+except Exception:
+    dxf_reader = None
+
+# ── Material database ──────────────────────────────────────────────────
 KNOWN_MATERIALS = {
     # Stainless steels
     "304": {"name": "Stainless Steel 304", "density_gcc": 7.9, "family": "stainless"},
@@ -29,6 +44,8 @@ KNOWN_MATERIALS = {
     "409": {"name": "Stainless Steel 409", "density_gcc": 7.7, "family": "stainless"},
     "430": {"name": "Stainless Steel 430", "density_gcc": 7.7, "family": "stainless"},
     "SUS304": {"name": "Stainless Steel SUS304", "density_gcc": 7.9, "family": "stainless"},
+    "SS304": {"name": "Stainless Steel 304", "density_gcc": 7.9, "family": "stainless"},
+    "SS316": {"name": "Stainless Steel 316", "density_gcc": 8.0, "family": "stainless"},
     # Carbon / mild steels
     "A36": {"name": "ASTM A36 Steel", "density_gcc": 7.85, "family": "carbon"},
     "1018": {"name": "AISI 1018 Steel", "density_gcc": 7.87, "family": "carbon"},
@@ -51,12 +68,22 @@ KNOWN_MATERIALS = {
     "C260": {"name": "Brass C260", "density_gcc": 8.53, "family": "brass"},
 }
 
+# Standard MSG (Manufacturer's Standard Gauge) - used for carbon/mild steel
 GAUGE_TO_INCHES = {
     7: 0.1793, 8: 0.1644, 9: 0.1495, 10: 0.1345, 11: 0.1196,
     12: 0.1046, 13: 0.0897, 14: 0.0747, 15: 0.0673, 16: 0.0598,
     17: 0.0538, 18: 0.0478, 19: 0.0418, 20: 0.0359, 21: 0.0329,
     22: 0.0299, 23: 0.0269, 24: 0.0239, 25: 0.0209, 26: 0.0179,
     27: 0.0164, 28: 0.0149, 29: 0.0135, 30: 0.0120,
+}
+
+# Stainless steel actual nominal thickness (slightly different from MSG)
+GAUGE_TO_INCHES_SS = {
+    7: 0.1875, 8: 0.1719, 9: 0.1563, 10: 0.1406, 11: 0.1250,
+    12: 0.1094, 13: 0.0938, 14: 0.0781, 15: 0.0703, 16: 0.0625,
+    17: 0.0563, 18: 0.0500, 19: 0.0438, 20: 0.0375, 21: 0.0344,
+    22: 0.0313, 23: 0.0281, 24: 0.0250, 25: 0.0219, 26: 0.0188,
+    27: 0.0172, 28: 0.0156, 29: 0.0141, 30: 0.0125,
 }
 
 FINISH_KEYWORDS = [
@@ -69,15 +96,15 @@ FINISH_KEYWORDS = [
 ]
 
 
-# ââ Regex patterns âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Regex patterns ─────────────────────────────────────────────────────
 
 def _compile_patterns():
     """Pre-compile all extraction patterns."""
     return {
         # Dimensions: 12.500, .125, 3/4, 1-1/2, with optional " or IN or MM
         "dimensions": re.compile(
-            r'(\d+\.?\d*)\s*[xXÃ]\s*(\d+\.?\d*)'  # LxW
-            r'(?:\s*[xXÃ]\s*(\d+\.?\d*))?'          # optional xH
+            r'(\d+\.?\d*)\s*[xX×]\s*(\d+\.?\d*)'  # LxW
+            r'(?:\s*[xX×]\s*(\d+\.?\d*))?'          # optional xH
             r'\s*(?:"|IN(?:CH(?:ES)?)?|MM|CM)?',
             re.IGNORECASE
         ),
@@ -94,9 +121,11 @@ def _compile_patterns():
         ),
         # Material callouts
         "material_steel": re.compile(
-            r'\b(30[14]L?|316L?|40[19]|430|SUS\s*30[14])\b'
+            r'\b(30[1-4]L?|316L?|409|41[06]|420|430|440C?|SUS\s*30[14])\b'
+            r'|\b(SS\s*30[14]L?|SS\s*316L?)\b'
             r'|\b(A-?36|ASTM\s*A-?36)\b'
-            r'|\b(10[12][\d]|1045)\s*(?:CRS|HRS|STEEL|STL)?\b'
+            r'|\b(?:AISI|SAE|UNS\s*G)\s*-?(10[12]\d|1045)\b'
+            r'|\b(10[12]\d|1045)\s*(?:CRS|HRS|STEEL|STL)\b'
             r'|\b(CRS|HRS|HRPO|CR\s*STEEL|HR\s*STEEL)\b'
             r'|\bSTAINLESS\s*(?:STEEL)?\b'
             r'|\bMILD\s*STEEL\b'
@@ -130,25 +159,25 @@ def _compile_patterns():
         ),
         # Tolerances
         "tolerance": re.compile(
-            r'[Â±]\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
+            r'[±]\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
             r'|\+/?-\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
-            r'|(?:TOL(?:ERANCE)?)\s*[:=]?\s*[Â±]?\s*(\d*\.?\d+)',
+            r'|(?:TOL(?:ERANCE)?)\s*[:=]?\s*[±]?\s*(\d*\.?\d+)',
             re.IGNORECASE
         ),
         "tolerance_class": re.compile(
-            r'\.X+\s*[Â±]\s*\.?\d+'
+            r'\.X+\s*[±]\s*\.?\d+'
             r'|UNLESS\s+OTHERWISE\s+(?:NOTED|SPECIFIED|STATED)',
             re.IGNORECASE
         ),
         # Bend info
         "bend_radius": re.compile(
-            r'(?:BEND\s*)?R(?:AD(?:IUS)?)?\.?\s*[:=]?\s*(\d*\.?\d+)\s*(?:"|IN|MM)?'
+            r'(?:BEND\s*)?R(?:AD(?:IUS)?)?\.?[ \t]*[:=]?[ \t]*(\d*\.?\d+)\s*(?:"|IN|MM)?'
             r'|(?:INSIDE|BEND)\s+(?:RAD(?:IUS)?|R)\s*[:=]?\s*(\d*\.?\d+)',
             re.IGNORECASE
         ),
         "bend_angle": re.compile(
-            r'(\d{1,3})\s*(?:Â°|DEG(?:REES?)?)\s*(?:BEND)?'
-            r'|BEND\s+(?:ANGLE\s*)?[:=]?\s*(\d{1,3})\s*(?:Â°|DEG)?',
+            r'(\d{1,3})\s*(?:°|DEG(?:REES?)?)\s*(?:BEND)?'
+            r'|BEND\s+(?:ANGLE\s*)?[:=]?\s*(\d{1,3})\s*(?:°|DEG)?',
             re.IGNORECASE
         ),
         # Part number
@@ -160,7 +189,7 @@ def _compile_patterns():
         ),
         # Quantity
         "quantity": re.compile(
-            r'(?:QTY|QUANTITY)\s*[:=]?\s*(\d+)'
+            r'(?:QTY|QUANTITY)(?:\s*(?:REQ(?:UIRED|\'?D)?|PER\s+ASS(?:Y|EMBLY)|PER\s+UNIT|ORDERED))?\s*[:=]?\s*(\d+)\b'
             r'|(\d+)\s*(?:PCS?|PIECES?|EA(?:CH)?)\b',
             re.IGNORECASE
         ),
@@ -172,7 +201,7 @@ def _compile_patterns():
         ),
         # Revision
         "revision": re.compile(
-            r'REV\.?\s*[:=]?\s*([A-Z0-9]{1,5})\b',
+            r'\bREV(?:ISION)?\b\.?[ \t]*[:=]?[ \t]*([A-Z0-9]{1,3})\b',
             re.IGNORECASE
         ),
     }
@@ -180,12 +209,24 @@ def _compile_patterns():
 PATTERNS = _compile_patterns()
 
 
-# ââ Extraction functions âââââââââââââââââââââââââââââââââââââââââââââââ
+# ── Extraction functions ───────────────────────────────────────────────
 
 def extract_text_from_pdf(pdf_path):
     """Extract text from all pages of a PDF."""
     if fitz is None:
-        raise ImportError("PyMuPDF (fitz) is required. Install with: pip install PyMuPDF")
+        # Fallback for environments without PyMuPDF (local testing)
+        try:
+            import pdfplumber
+        except ImportError:
+            raise ImportError("PyMuPDF (fitz) is required. Install with: pip install PyMuPDF")
+        pages, full_text = [], ""
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, pg in enumerate(pdf.pages):
+                t = pg.extract_text() or ""
+                pages.append({"page": i + 1, "text": t, "has_text": len(t.strip()) > 20})
+                full_text += t + "\n"
+        text_pages = sum(1 for p in pages if p["has_text"])
+        return full_text, pages, text_pages < len(pages) * 0.3
 
     doc = fitz.open(pdf_path)
     pages = []
@@ -294,9 +335,45 @@ def find_materials(text):
     return unique
 
 
-def find_thickness(text):
-    """Extract sheet thickness from drawing."""
+def detect_units(text):
+    """Return 'mm' or 'in' for the drawing's linear dimensions.
+
+    Explicit statements win ("DIMENSIONS ARE IN MILLIMETERS/INCHES", "ALL DIMENSIONS
+    IN MM", "UNITS: MM").  Dual-unit tolerance tables that list both MILLIMETERS
+    and INCHES default to inches unless stated.  Otherwise metric is inferred
+    from comma decimals ("-0,5") and "<n>mm" tokens.
+    """
+    up = text.upper()
+    if re.search(r'DIMENSIONS?\s+(?:ARE\s+)?(?:SHOWN\s+)?IN\s+(?:MILLIMET|MM\b)|ALL\s+DIMENSIONS\s+(?:ARE\s+)?IN\s+(?:MM|MILLIMET)'
+                 r'|UNITS?\s*[:=]?\s*(?:MM|MILLIMET)', up):
+        return "mm"
+    if re.search(r'DIMENSIONS?\s+(?:ARE\s+)?(?:SHOWN\s+)?IN\s+INCH|UNITS?\s*[:=]?\s*INCH', up):
+        return "in"
+    comma_dec = len(re.findall(r'(?<![\d,])[-+]?\d{1,4},\d{1,3}(?![\d,])', text))
+    mm_tok = len(re.findall(r'\d\s*MM\b', up))
+    inch_tok = len(re.findall(r'\d\s*(?:"|IN\b|INCH)', up))
+    if (comma_dec >= 3 or mm_tok >= 3) and inch_tok < max(comma_dec, mm_tok):
+        return "mm"
+    return "in"
+
+
+def find_thickness(text, material_family=None, units="in"):
+    """Extract sheet thickness from drawing.
+
+    Args:
+        text: Drawing text to parse.
+        material_family: If 'stainless', use stainless steel gauge table.
+    """
     results = []
+
+    # Auto-detect stainless from text if not specified
+    if material_family is None:
+        text_upper = text.upper()
+        if any(kw in text_upper for kw in ('STAINLESS', 'SS304', 'SS316', 'SUS304', 'SUS316', '304L', '316L', '304 ', '316 ')):
+            material_family = 'stainless'
+
+    # Pick the right gauge table
+    gauge_table = GAUGE_TO_INCHES_SS if material_family == 'stainless' else GAUGE_TO_INCHES
 
     # Decimal thickness with explicit THK/THICK keyword
     for m in PATTERNS["thickness_decimal"].finditer(text):
@@ -304,8 +381,13 @@ def find_thickness(text):
         if val:
             try:
                 t = float(val)
-                if 0.005 <= t <= 1.0:  # reasonable sheet metal thickness in inches
-                    results.append({"value_in": round(t, 4), "gauge": None, "raw": m.group(0).strip()})
+                if units == "mm" and '"' not in m.group(0) and 'IN' not in m.group(0).upper():
+                    if 0.3 <= t <= 25:
+                        results.append({"value_in": round(t / 25.4, 4), "gauge": None, "_pos": m.start(),
+                                        "raw": m.group(0).strip() + " (mm)", "unit": "mm", "value_mm": t})
+                elif 0.005 <= t <= 1.0:  # reasonable sheet metal thickness in inches
+                    results.append({"value_in": round(t, 4), "gauge": None, "raw": m.group(0).strip(),
+                                    "_pos": m.start()})
             except ValueError:
                 pass
 
@@ -315,14 +397,27 @@ def find_thickness(text):
         if val:
             try:
                 g = int(val)
-                if g in GAUGE_TO_INCHES:
+                if g in gauge_table:
                     results.append({
-                        "value_in": GAUGE_TO_INCHES[g],
+                        "_pos": m.start(),
+                        "value_in": gauge_table[g],
                         "gauge": g,
-                        "raw": m.group(0).strip()
+                        "raw": m.group(0).strip(),
+                        "gauge_standard": "SS" if material_family == 'stainless' else "MSG"
                     })
             except ValueError:
                 pass
+
+    # Metric sheet callouts: "1.5mm Sheet Steel", "3 MM PLATE", "2.0mm THK"
+    for m in re.finditer(r'(?<![\d.])(\d{1,2}(?:[.,]\d{1,2})?)\s*MM\s*(?:\(|\b)?\s*(?:SHEET|PLATE|THK|THICK(?:NESS)?)\b',
+                         text, re.IGNORECASE):
+        try:
+            mm = float(m.group(1).replace(',', '.'))
+        except ValueError:
+            continue
+        if 0.3 <= mm <= 25:
+            results.append({"value_in": round(mm / 25.4, 4), "gauge": None, "_pos": m.start(),
+                            "raw": m.group(0).strip(), "unit": "mm", "value_mm": mm})
 
     # Contextual thickness: if drawing has bends but no explicit thickness yet,
     # look for standalone dimensions matching standard sheet metal gauges.
@@ -353,6 +448,11 @@ def find_thickness(text):
                 except ValueError:
                     pass
 
+    # Explicit callouts in document order (first mention wins); inferred ones stay last
+    results.sort(key=lambda t: (1 if "inferred" in str(t.get("raw", "")) else 0, t.get("_pos", 10 ** 9)))
+    for t in results:
+        t.pop("_pos", None)
+
     # Deduplicate
     seen = set()
     unique = []
@@ -362,6 +462,66 @@ def find_thickness(text):
             seen.add(key)
             unique.append(t)
     return unique
+
+
+_FIT_LETTERS = r'(?:CD|EF|FG|JS|Z[ABC]|[A-HJKMNP-VX-Z]|cd|ef|fg|js|z[abc]|[a-hjkmnp-vx-z])'
+_FIT_RE = re.compile(
+    r'(?<![\d.])(\d*\.\d{2,4})[ \t]*"?[ \t]+(' + _FIT_LETTERS + r')(\d{1,2})\b'
+)
+
+
+def find_fits(text):
+    """Find ISO limits-and-fits callouts such as '1.000 F7' or '.750 h6'.
+
+    Nearby +/- limit deviations (e.g. '-.001' / '-.002' printed above/below the
+    nominal) are attached when found within a short window.
+    """
+    fits = []
+    seen = set()
+    for m in _FIT_RE.finditer(text):
+        grade = int(m.group(3))
+        if not 1 <= grade <= 18:
+            continue
+        try:
+            nominal = float(m.group(1))
+        except ValueError:
+            continue
+        if nominal <= 0 or nominal > 60:
+            continue
+        cls = m.group(2) + m.group(3)
+        # Limit deviations are usually printed just above/below the nominal;
+        # text extractors may place them a few lines away, so look in a wider
+        # window and keep the two closest small signed values.
+        w0 = max(0, m.start() - 60)
+        window = text[w0:m.end() + 60]
+        cands = []
+        for dm in re.finditer(r'(?<![\w.])([+\-])\s*(\.\d{3,4}|0\.\d{3,4})\b', window):
+            try:
+                v = float(dm.group(2)) * (-1 if dm.group(1) == '-' else 1)
+            except ValueError:
+                continue
+            if abs(v) > 0.05:
+                continue
+            pos = w0 + dm.start()
+            dist = (m.start() - pos) if pos < m.start() else (pos - m.end())
+            cands.append((dist, v))
+        devs = []
+        for _, v in sorted(cands):
+            if v not in devs:
+                devs.append(v)
+            if len(devs) == 2:
+                break
+        devs.sort(reverse=True)
+        raw = f"{m.group(1)} {cls}"
+        if devs:
+            raw += " (" + "/".join(("+" if d >= 0 else "-") + f"{abs(d):.3f}".lstrip("0") for d in devs) + ")"
+        key = (round(nominal, 4), cls.upper())
+        if key in seen:
+            continue
+        seen.add(key)
+        fits.append({"nominal_in": round(nominal, 4), "fit_class": cls,
+                     "deviations_in": devs, "raw": raw})
+    return fits
 
 
 def find_tolerances(text):
@@ -382,7 +542,56 @@ def find_tolerances(text):
     for m in PATTERNS["tolerance_class"].finditer(text):
         results.append({"value": None, "raw": m.group(0).strip(), "type": "general_note"})
 
-    return results
+    # --- Extract structured tolerance block ---
+    # FRACTIONAL 1/16
+    frac_m = re.search(r'FRACTIONAL\s+(\d+/\d+)', text, re.IGNORECASE)
+    if frac_m:
+        results.append({"value": None, "raw": f"FRACTIONAL {frac_m.group(1)}", "type": "fractional"})
+
+    # ANGULAR: MACH 1° BEND 1°
+    ang_m = re.search(
+        r'ANGULAR\s*:\s*(?:MACH\s*(\d+)\s*[°]?\s*)?(?:BEND\s*(\d+)\s*[°]?)?',
+        text, re.IGNORECASE
+    )
+    if ang_m and (ang_m.group(1) or ang_m.group(2)):
+        parts = []
+        if ang_m.group(1):
+            parts.append(f"MACH {ang_m.group(1)}deg")
+        if ang_m.group(2):
+            parts.append(f"BEND {ang_m.group(2)}deg")
+        results.append({"value": None, "raw": f"ANGULAR: {', '.join(parts)}", "type": "angular"})
+
+    # TWO PLACE DECIMAL .020 / THREE PLACE DECIMAL .005
+    for dec_m in re.finditer(
+        r'((?:ONE|TWO|THREE|FOUR)\s+PLACE\s+DECIMAL)\s+\.?(\d{2,4})',
+        text, re.IGNORECASE
+    ):
+        try:
+            # Always treat captured digits as fractional part (e.g. "020" -> 0.020)
+            val = float('0.' + dec_m.group(2))
+            results.append({
+                "value": val,
+                "raw": f"{dec_m.group(1)} .{dec_m.group(2)}",
+                "type": "decimal_places"
+            })
+        except ValueError:
+            results.append({"value": None, "raw": dec_m.group(0).strip(), "type": "decimal_places"})
+
+    # ISO fit callouts on machined features (e.g. "1.000 F7" with -.001/-.002 limits)
+    for fit in find_fits(text):
+        results.append({"value": None, "raw": fit["raw"], "type": "fit",
+                        "nominal_in": fit["nominal_in"], "fit_class": fit["fit_class"],
+                        "deviations_in": fit["deviations_in"]})
+
+    # Deduplicate by raw text
+    seen = set()
+    unique = []
+    for t in results:
+        key = t["raw"].upper().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+    return unique
 
 
 def find_bends(text):
@@ -390,7 +599,22 @@ def find_bends(text):
     radii = []
     angles = []
 
-    for m in PATTERNS["bend_radius"].finditer(text):
+    # --- Strip out tolerance block text to avoid false bend detections ---
+    # Lines like "ANGULAR: MACH 1° BEND 1°" are tolerances, not bends.
+    # Also strip "FRACTIONAL", "DECIMAL" tolerance lines.
+    tol_block_re = re.compile(
+        r'(?:UNLESS\s+OTHERWISE\s+(?:SPECIFIED|NOTED|STATED)[:\s]*'
+        r'|ANGULAR\s*:\s*.*'
+        r'|FRACTIONAL\s+\d.*'
+        r'|(?:TWO|THREE|ONE|FOUR)\s+PLACE\s+DECIMAL.*'
+        r'|TOLERANCES?\s*:\s*.*'
+        r'|INTERPRET\s+GEOMETRIC.*'
+        r'|DIMENSIONS\s+ARE\s+IN\s+.*)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    clean_text = tol_block_re.sub('', text)
+
+    for m in PATTERNS["bend_radius"].finditer(clean_text):
         val = m.group(1) or m.group(2)
         if val:
             try:
@@ -400,12 +624,15 @@ def find_bends(text):
             except ValueError:
                 pass
 
-    for m in PATTERNS["bend_angle"].finditer(text):
+    for m in PATTERNS["bend_angle"].finditer(clean_text):
         val = m.group(1) or m.group(2)
         if val:
             try:
                 a = float(val)
-                if 1 <= a <= 180:
+                # Skip very small angles (likely tolerance specs that slipped through)
+                if a < 5:
+                    continue
+                if 5 <= a <= 180:
                     angles.append({"value_deg": a, "raw": m.group(0).strip()})
             except ValueError:
                 pass
@@ -417,12 +644,51 @@ def find_dimensions(text):
     """Extract overall dimensions from drawing."""
     dims = []
 
+    # Diameter symbol variants
+    DIA = r'[∅Ø⌀]'
+
     # LxW or LxWxH patterns
     for m in PATTERNS["dimensions"].finditer(text):
+        raw = m.group(0).strip()
+        match_start = m.start()
+        match_end = m.end()
+
+        # --- Filter out hole callouts and thread specs disguised as dimensions ---
+        # Check if this NxD match is actually a feature callout (e.g. "30 x ∅ 0.17 THRU ALL")
+        # or a metric thread spec (e.g. "M5x0.8")
+        before_ctx = text[max(0, match_start - 5):match_start]
+        after_ctx = text[match_end:match_end + 30]
+
+        # Skip metric thread specs like M5x0.8, M10x1.5
+        if re.search(r'M\d*$', before_ctx):
+            continue
+
+        # Skip if followed by THRU, DP, DEEP (hole depth qualifier)
+        if re.match(r'\s*(?:THRU|DP|DEEP)\b', after_ctx, re.IGNORECASE):
+            continue
+        # Skip if a diameter symbol appears between the two numbers
+        between = text[m.start():m.end()]
+        if re.search(DIA, between):
+            continue
+        # Skip if diameter symbol appears right before the second number
+        # e.g. "30 x ∅ 0.17" — the ∅ may be between "x" and the number
+        gap_text = text[m.start():m.end()]
+        x_pos = re.search(r'[xX×]', gap_text)
+        if x_pos:
+            after_x = gap_text[x_pos.end():]
+            if re.match(r'\s*' + DIA, after_x):
+                continue
+        # Also check the broader context: if the full line looks like "N x ∅ D THRU"
+        line_start = text.rfind('\n', max(0, match_start - 80), match_start)
+        line_end = text.find('\n', match_end, match_end + 80)
+        full_line = text[line_start + 1 if line_start >= 0 else 0 : line_end if line_end >= 0 else match_end + 80]
+        if re.search(DIA + r'\s*\d', full_line) and re.search(r'THRU', full_line, re.IGNORECASE):
+            continue
+
         d = {"length": float(m.group(1)), "width": float(m.group(2))}
         if m.group(3):
             d["height"] = float(m.group(3))
-        d["raw"] = m.group(0).strip()
+        d["raw"] = raw
         # Filter out obviously wrong matches (too small or too large)
         if 0.01 <= d["length"] <= 500 and 0.01 <= d["width"] <= 500:
             dims.append(d)
@@ -449,8 +715,12 @@ def find_part_info(text):
             break
 
     # Revision
+    REV_STOP = {"QTY", "NO", "DWG", "THE", "AND", "SIZE", "DATE", "BY", "DES", "ECO", "ECN"}
     for m in PATTERNS["revision"].finditer(text):
-        info["revision"] = m.group(1).strip()
+        rv = m.group(1).strip()
+        if rv.upper() in REV_STOP:
+            continue
+        info["revision"] = rv
         break
 
     # Scale
@@ -477,6 +747,29 @@ def find_finishes(text):
             context = text[start:end].strip()
             found.append({"finish": kw, "context": context})
 
+    # Title-block "FINISH" field (e.g. "FINISH Machined", "FINISH: #4 BRUSHED")
+    FINISH_STOP = {
+        "NEXT", "ASSY", "USED", "ON", "APPLICATION", "DO", "NOT", "SCALE", "DWG", "SIZE",
+        "REV", "DATE", "NAME", "WEIGHT", "SHEET", "MATERIAL", "COMMENTS", "QTY", "TITLE",
+        "TREATMENT", "SPECIFIED", "NOTED", "AS", "SEE", "NO", "NO.", "PART", "JOB", "DRAWN",
+        "CHECKED", "UNLESS", "TOLERANCES", "DIMENSIONS", "THE", "AND", "OR", "OF",
+        "CHICAGO", "METALCRAFT", "IS", "PROHIBITED", "WITHOUT", "WRITTEN", "PERMISSION",
+        "COPYRIGHT", "PROPRIETARY", "CONFIDENTIAL", "INFORMATION", "REPRODUCTION",
+        "INTERPRET", "NOTES", "NOTE", "GENERAL", "ENG", "MFG", "APPR", "APPR.", "Q.A.", "CUSTOMER", "APPROVAL",
+    }
+    for m in re.finditer(r'\bFINISH\b\s*[:\-]?[ \t]*\n?[ \t]*([A-Za-z#][\w#\-/]*)', text, re.IGNORECASE):
+        word = m.group(1).strip()
+        if word.upper() in FINISH_STOP or len(word) < 2:
+            continue
+        found.append({"finish": word.capitalize() if word.isalpha() else word,
+                      "context": m.group(0).strip(), "source": "title_block"})
+        break
+
+    # Standalone "Machined" / "As Machined" value (title-block cell on its own line)
+    if not any(f.get("source") == "title_block" for f in found):
+        if re.search(r'^[ \t]*(?:AS[ \t]+)?MACHINED[ \t]*$', text, re.IGNORECASE | re.MULTILINE):
+            found.append({"finish": "Machined", "context": "Machined", "source": "title_block"})
+
     # Deduplicate by finish keyword
     seen = set()
     unique = []
@@ -487,17 +780,29 @@ def find_finishes(text):
     return unique
 
 
-def find_features(text):
+def find_features(text, units="in"):
+    feats = _find_features_raw(text, units)
+    if units == "mm":
+        for f in feats:
+            for k in ("diameter_in", "cbore_dia_in", "cbore_depth_in", "csink_dia_in", "width_in", "length_in"):
+                if f.get(k):
+                    f[k.replace("_in", "_mm")] = f[k]
+                    f[k] = round(f[k] / 25.4, 4)
+            f["units"] = "mm"
+    return feats
+
+
+def _find_features_raw(text, units="in"):
     """Extract hole/feature callouts like '4X .28 THRU', 'dia 1.27 THRU', etc."""
     features = []
 
-    # Diameter symbol variants: â (U+2205), Ã (U+00D8), â (U+2300)
-    DIA = r'[âÃâ]'
+    # Diameter symbol variants: ∅ (U+2205), Ø (U+00D8), ⌀ (U+2300)
+    DIA = r'[∅Ø⌀]'
 
-    # ââ Round holes: [NX] [â] .DDD [THRU | DP depth] ââ
+    # ── Round holes: [NX] [∅] .DDD [THRU | DP depth] ──
     hole_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'               # optional count  "4X "
-        r'(?:' + DIA + r'\s*)?'                # optional â
+        r'(?:' + DIA + r'\s*)?'                # optional ∅
         r'(\d*\.\d+|\d+\.\d*)'                # diameter
         r'\s*(?:"|IN)?\s*'                     # optional units
         r'(THRU(?:\s*ALL)?'                    # through
@@ -511,9 +816,20 @@ def find_features(text):
             dia = float(m.group(2))
         except (ValueError, TypeError):
             continue
-        if dia < 0.01 or dia > 10.0:
+        if dia < 0.01 or dia > (250.0 if units == "mm" else 10.0):
             continue
-        count = int(m.group(1)) if m.group(1) else 1
+        # Allow count even across newlines for round holes (PDF text extraction
+        # often breaks annotations across lines). Only reject if there's substantial
+        # unrelated text between count and diameter.
+        count = 1
+        if m.group(1):
+            count_end = m.start(1) + len(m.group(1))
+            dia_start = m.start(2)
+            between = text[count_end:dia_start]
+            # Allow if between is only whitespace, newlines, and diameter symbols
+            between_clean = re.sub(r'[\s∅Ø⌀xX×]', '', between)
+            if len(between_clean) == 0:
+                count = int(m.group(1))
         is_thru = 'THRU' in (m.group(3) or '').upper()
 
         feat = {
@@ -548,7 +864,7 @@ def find_features(text):
 
         features.append(feat)
 
-    # ââ Tapped holes: [NX] thread-pitch [UNC|UNF] [THRU|DP] ââ
+    # ── Tapped holes: [NX] thread-pitch [UNC|UNF] [THRU|DP] ──
     # Strict patterns to avoid matching part numbers, dates, material grades
     tap_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'
@@ -579,7 +895,14 @@ def find_features(text):
                 num_size, tpi = int(nm.group(1)), int(nm.group(2))
                 if num_size > 14 or tpi < 4 or tpi > 100:
                     continue
-        elif not thread.upper().startswith('M'):
+        elif thread.upper().startswith('M'):
+            # Metric thread: validate reasonable size (M1 through M100)
+            mm = re.match(r'M(\d+)', thread)
+            if mm:
+                metric_size = int(mm.group(1))
+                if metric_size > 100 or metric_size < 1:
+                    continue
+        else:
             # Plain digit-dash-digit without # or M: skip (too ambiguous -- matches part numbers, dates)
             continue
 
@@ -588,7 +911,19 @@ def find_features(text):
         if not thread.startswith('#') and not thread.upper().startswith('M') and not qualifier.strip():
             continue
 
-        count = int(m.group(1)) if m.group(1) else 1
+        # Validate count: if count prefix and thread spec are on different lines, skip
+        # (prevents "30 x\n∅ 0.17" bleeding count into "M5x0.8" on the next line)
+        count = 1
+        if m.group(1):
+            # Check if the count and thread are on the same line
+            count_end = m.start(1) + len(m.group(1))
+            thread_start = m.start(2)
+            between = text[count_end:thread_start]
+            if '\n' in between:
+                # Count and thread on different lines — ignore the count
+                count = 1
+            else:
+                count = int(m.group(1))
         depth_str = m.group(4) or ''
 
         feat = {
@@ -600,7 +935,7 @@ def find_features(text):
         }
         features.append(feat)
 
-    # ââ Slots: W x L [THRU] or SLOT W x L ââ
+    # ── Slots: W x L [THRU] or SLOT W x L ──
     slot_re = re.compile(
         r'(?:(\d+)\s*[Xx]\s+)?'
         r'(?:SLOT\s+)?'
@@ -614,7 +949,8 @@ def find_features(text):
             l = float(m.group(3))
         except (ValueError, TypeError):
             continue
-        if w < 0.01 or l < 0.01 or w > 20 or l > 20:
+        lim = 500 if units == "mm" else 20
+        if w < 0.01 or l < 0.01 or w > lim or l > lim:
             continue
         count = int(m.group(1)) if m.group(1) else 1
         features.append({
@@ -636,6 +972,179 @@ def find_features(text):
     return unique
 
 
+# ── Machined vs sheet-metal classification ─────────────────────────────
+
+_TOL_BLOCK_RE = re.compile(
+    r'(?:UNLESS\s+OTHERWISE\s+(?:SPECIFIED|NOTED|STATED)[:\s]*'
+    r'|ANGULAR\s*:\s*.*'
+    r'|(?:MACH|BEND)\s*\d{1,2}\s*°.*'
+    r'|FRACTIONAL\s+\d.*'
+    r'|(?:TWO|THREE|ONE|FOUR)\s+PLACE\s+DECIMAL.*'
+    r'|TOLERANCES?\s*:\s*.*'
+    r'|INTERPRET\s+GEOMETRIC.*'
+    r'|DIMENSIONS\s+ARE\s+IN\s+.*)',
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def classify_drawing(text, thickness, bends, fits):
+    """Score the drawing text for machined vs sheet-metal evidence.
+
+    Standard title-block text (e.g. 'ANGULAR: MACH 1° BEND 1°') appears on
+    every drawing and is stripped before scoring so it can't vote either way.
+    Returns (fab_type, confidence, evidence dict).
+    """
+    clean = _TOL_BLOCK_RE.sub(' ', text)
+    up = clean.upper()
+    mach, sheet = 0, 0
+    ev = {"machined": [], "sheet_metal": []}
+
+    def add(kind, pts, why):
+        nonlocal mach, sheet
+        if kind == "m":
+            mach += pts
+            ev["machined"].append(why)
+        else:
+            sheet += pts
+            ev["sheet_metal"].append(why)
+
+    # --- machined evidence ---
+    if fits:
+        add("m", 3, "fit callout " + ", ".join(f["fit_class"] for f in fits[:3]))
+    if re.search(r'\d\s*"?\s*O\.?D\.?\b', up):
+        add("m", 2, "OD callout")
+    m = re.search(r'\b(SHAFTS?|SPINDLE|AXLE|BUSHING|SLEEVE|COLLAR|SPACER|HUB|JOURNAL|STUD|DOWEL|ARBOR|MANDREL|PULLEY|SPROCKET|GEAR)\b', up)
+    if m:
+        add("m", 2, f"part noun '{m.group(1)}'")
+    if re.search(r'\b(KEYWAY|KEYSEAT|KEY\s*SEAT|SNAP\s*RING\s*GROOVE|RETAINING\s*RING\s*GROOVE|UNDERCUT|KNURL|CENTER\s*DRILL|TURN(?:ED)?\b|LATHE|GRIND|GROUND)\b', up):
+        add("m", 2, "turning/milling feature")
+    if re.search(r'\bFINISH\b\s*[:\-]?\s*MACHINED\b|\bAS\s+MACHINED\b|\bMACHINED\s+FINISH\b|^[ \t]*MACHINED[ \t]*$', up, re.MULTILINE):
+        add("m", 2, "finish = machined")
+    if re.search(r'\b\d{1,3}\s*(?:RA|RMS|µIN|MICRO\s*IN)\b|√', up):
+        add("m", 2, "surface roughness callout")
+    if re.search(r'\b(ROUND\s+BAR|BAR\s+STOCK|RD\s+BAR|ROD\b|HEX\s+BAR|SOLID\s+BAR|PLATE\s+STOCK|BILLET)', up):
+        add("m", 2, "bar/billet stock")
+    if re.search(r'\bTHRU\s+(?:BORE|BORED)|\bC\'?BORE\b|\bBORE\b', up):
+        add("m", 1, "bore")
+
+    # --- sheet metal evidence ---
+    if thickness:
+        t0 = thickness[0]
+        raw_up = str(t0.get("raw", "")).upper()
+        if t0.get("gauge") or "THK" in raw_up or "THICK" in raw_up or "SHEET" in raw_up or "PLATE" in raw_up:
+            add("s", 3, f"thickness/gauge '{t0.get('raw')}'")
+    if re.search(r'\b(?:UP|DN|DOWN)\s*\d{1,3}\s*°|\bBEND\s*(?:LINE|RADIUS|RAD\b|R\b)|INSIDE\s+RAD|\bFLAT\s+PATTERN\b|K-?\s*FACTOR|\bFORMED\b|\bPRESS\s*BRAKE\b|\bBRAKE\b|\bHEM(?:MED)?\b', up):
+        add("s", 3, "bend/flat-pattern notation")
+    n_ang = len((bends or {}).get("angles", []))
+    if n_ang:
+        add("s", min(2, n_ang), f"{n_ang} bend angle(s)")
+    if re.search(r'\bSHEET\s+METAL\b|\bSHT\s*MTL\b|\bLASER\s+CUT\b|\bPUNCH(?:ED)?\b', up):
+        add("s", 2, "sheet-metal process note")
+
+    if mach >= 3 and mach > sheet:
+        conf = "high" if mach - sheet >= 4 else "medium"
+        return "machined", conf, ev
+    if sheet > 0:
+        conf = "high" if sheet >= 4 else "medium"
+        return "sheet_metal", conf, ev
+    return "unknown", "low", ev
+
+
+def find_machined_stock(text, fits=None, density_gcc=None, units="in"):
+    """Estimate raw stock for a machined (turned) part: OD, ID and overall length."""
+    clean = _TOL_BLOCK_RE.sub(' ', text)
+    DIA = r'[∅Ø⌀]'
+    diameters = []
+    for m in re.finditer(r'(?<![\d.])(\d*\.\d+|\d+)\s*"?\s*O\.?D\.?\b', clean, re.IGNORECASE):
+        try:
+            diameters.append(float(m.group(1)))
+        except ValueError:
+            pass
+    for m in re.finditer(DIA + r'\s*(\d*\.\d+)(?!\s*(?:"|IN)?\s*(?:THRU|DP|DEEP|X))', clean, re.IGNORECASE):
+        try:
+            diameters.append(float(m.group(1)))
+        except ValueError:
+            pass
+    for f in fits or []:
+        diameters.append(f["nominal_in"])
+    diameters = [d for d in diameters if 0.05 <= d <= 30]
+
+    ids = []
+    for m in re.finditer(r'(?<![\d.])(\d*\.\d+|\d+)\s*"?\s*I\.?D\.?\b', clean, re.IGNORECASE):
+        try:
+            ids.append(float(m.group(1)))
+        except ValueError:
+            pass
+
+    # Overall length = largest 3-place decimal dimension on the sheet
+    # (skip signed limit deviations like -.001 and title-block tolerance values)
+    lengths = []
+    for m in re.finditer(r'(?<![\d.+\-/])(\d{1,3}\.\d{3})(?![\d])', clean):
+        try:
+            lengths.append(float(m.group(1)))
+        except ValueError:
+            pass
+    if units == "mm":
+        # metric drawings: accept 1-2 place decimals and whole numbers as lengths
+        lengths = []
+        for m in re.finditer(r'(?<![\d.,+\-/])(\d{1,4}(?:[.,]\d{1,2})?)(?![\d])', clean):
+            try:
+                v = float(m.group(1).replace(',', '.'))
+            except ValueError:
+                continue
+            if 5 <= v <= 3000:
+                lengths.append(v)
+        diameters = [d / 25.4 for d in diameters]
+        ids = [d / 25.4 for d in ids]
+        lengths = [v / 25.4 for v in lengths]
+    od = max(diameters) if diameters else None
+    overall_len = max(lengths) if lengths else None
+    if od and overall_len and overall_len < od:
+        overall_len = None
+
+    stock = {
+        "stock_shape": "round_bar" if od else "unknown",
+        "od_in": round(od, 4) if od else None,
+        "id_in": round(max(ids), 4) if ids else None,
+        "overall_length_in": round(overall_len, 3) if overall_len else None,
+        "diameters_in": sorted(set(round(d, 4) for d in diameters), reverse=True),
+    }
+    if od and overall_len:
+        import math
+        area = math.pi / 4 * (od ** 2 - (stock["id_in"] or 0) ** 2)
+        vol = area * overall_len
+        stock["stock_volume_in3"] = round(vol, 2)
+        if density_gcc:
+            stock["stock_weight_lb"] = round(vol * density_gcc * 0.0361273, 2)
+    return stock
+
+
+def finalize_fab_type(result, text):
+    """Decide fab type and scrub sheet-metal-only fields from machined parts."""
+    fits = [t for t in result.get("tolerances", []) if t.get("type") == "fit"]
+    fab, conf, ev = classify_drawing(text, result.get("thickness"), result.get("bends"), fits)
+    result["likely_fab_type"] = fab
+    result["fab_type_confidence"] = conf
+    result["fab_type_evidence"] = ev
+    if fab == "machined":
+        # Bends / gauge don't apply to a machined part
+        result["bends"] = {"radii": [], "angles": []}
+        result["thickness"] = [t for t in result.get("thickness", [])
+                               if "inferred" not in str(t.get("raw", ""))]
+        density = None
+        for mat in result.get("materials", []):
+            if mat.get("density_gcc"):
+                density = mat["density_gcc"]
+                break
+        result["machined_stock"] = find_machined_stock(
+            text, [{"nominal_in": f["nominal_in"]} for f in fits], density, units=result.get("units", "in"))
+    elif fab == "unknown":
+        has_dims = bool(result.get("dimensions")) or bool(result.get("materials"))
+        result["fab_type_confidence"] = "low" if has_dims else "none"
+    result["missing_info"] = identify_missing_info(result)
+    return result
+
+
 def identify_missing_info(result):
     """Flag what's missing that Sales would need to ask about."""
     missing = []
@@ -646,7 +1155,23 @@ def identify_missing_info(result):
             "message": "No material callout found on drawing. Ask customer for material specification."
         })
 
-    if not result.get("thickness"):
+    if result.get("likely_fab_type") == "sheet_metal":
+        n_ang = len((result.get("bends") or {}).get("angles", []))
+        if n_ang:
+            missing.append({
+                "field": "Bend count (verify)",
+                "message": f"{n_ang} bend(s) found from bend callouts on the drawing. Bends without a "
+                           "callout can't be detected from a PDF - confirm against the views or upload the STEP."
+            })
+
+    if result.get("likely_fab_type") == "machined":
+        st = result.get("machined_stock") or {}
+        if not (st.get("od_in") and st.get("overall_length_in")):
+            missing.append({
+                "field": "Stock size",
+                "message": "Could not determine raw stock (OD x length). Confirm bar/billet size."
+            })
+    elif not result.get("thickness"):
         missing.append({
             "field": "Thickness",
             "message": "No sheet thickness or gauge found. Ask customer for material thickness."
@@ -673,43 +1198,154 @@ def identify_missing_info(result):
     return missing
 
 
-def _analyze_single_page(page_text, page_num):
+# ── Layout (coordinate) enrichment ─────────────────────────────────────
+
+def _fmt_dev(v):
+    s = f"{abs(v):.4f}".rstrip("0")
+    s = s[1:] if s.startswith("0.") else s
+    if "." in s:
+        while len(s.split(".")[1]) < 3:
+            s += "0"
+    return ("+" if v >= 0 else "-") + s
+
+
+def _annotate_fit(t):
+    """Attach ISO 286 limits to a fit tolerance and flag tightness / case mix-ups."""
+    if iso286 is None or not t.get("fit_class") or not t.get("nominal_in"):
+        return t
+    cls = t["fit_class"]
+    iso = iso286.fit_limits_in(t["nominal_in"], cls)
+    if iso:
+        t["iso_limits"] = iso
+    printed = t.get("deviations_in") or []
+    if len(printed) >= 2:
+        up, lo = max(printed), min(printed)
+        t["band_in"] = round(up - lo, 4)
+        # Printed limits that look like the opposite case (F7 printed with shaft-style
+        # negative limits usually means f7) are worth flagging for the estimator.
+        if iso and ((up <= 0) != (iso["upper_in"] <= 0)):
+            swapped = cls.swapcase()
+            alt = iso286.fit_limits_in(t["nominal_in"], swapped)
+            if alt and ((up <= 0) == (alt["upper_in"] <= 0)):
+                t["note"] = f"Printed limits match ISO {swapped} ({alt['kind']}), not {cls}"
+    elif iso:
+        t["band_in"] = iso["band_in"]
+        t["raw"] = f"{t['raw'].split(' (')[0]} (ISO {_fmt_dev(iso['upper_in'])}/{_fmt_dev(iso['lower_in'])})"
+    return t
+
+
+def apply_layout(result, words):
+    """Enrich regex results with coordinate-based title block + stacked tolerances."""
+    if drawing_layout is None or not words:
+        return result
+    try:
+        tb = drawing_layout.read_title_block(words)
+    except Exception:
+        tb = {}
+    if tb:
+        result["title_block"] = tb
+        pi = result.setdefault("part_info", {})
+        q = tb.get("qty", "")
+        if re.fullmatch(r'\d{1,6}', q.strip()):
+            pi["quantity"] = int(q)
+        pn = tb.get("part") or tb.get("dwg_no")
+        if pn:
+            pi["part_number"] = pn
+        if tb.get("rev"):
+            pi["revision"] = tb["rev"]
+        elif "revision" in pi:
+            # title block has a REV cell and it is empty - drop regex guesses
+            pi.pop("revision", None)
+        if tb.get("title"):
+            pi["title"] = tb["title"]
+        if tb.get("finish"):
+            fin = tb["finish"]
+            result["finishes"] = [{"finish": fin, "context": f"FINISH: {fin}", "source": "title_block"}] + \
+                [f for f in result.get("finishes", []) if f.get("source") != "title_block"
+                 and f.get("finish", "").lower() != fin.lower()]
+        if tb.get("material"):
+            mats = find_materials(tb["material"])
+            for mm in mats:
+                mm["source"] = "title_block"
+            names = {(m.get("name") or m["raw_callout"]).upper() for m in mats}
+            result["materials"] = mats + [m for m in result.get("materials", [])
+                                          if (m.get("name") or m["raw_callout"]).upper() not in names]
+            result["material_callout"] = tb["material"]
+
+    # Stacked limit deviations (e.g. "1.000 F7" with -.001 / -.002 printed beside it)
+    try:
+        stacked = drawing_layout.find_stacked_tolerances(words)
+    except Exception:
+        stacked = []
+    if stacked:
+        tols = result.setdefault("tolerances", [])
+        for st in stacked:
+            devs = [st["upper_in"], st["lower_in"]]
+            if st.get("fit_class"):
+                match = None
+                for t in tols:
+                    if t.get("type") == "fit" and t.get("fit_class", "").upper() == st["fit_class"].upper() \
+                            and abs((t.get("nominal_in") or 0) - st["nominal_in"]) < 1e-4:
+                        match = t
+                        break
+                if match is None:
+                    match = {"value": None, "type": "fit", "nominal_in": st["nominal_in"],
+                             "fit_class": st["fit_class"]}
+                    tols.append(match)
+                match["deviations_in"] = devs
+                match["raw"] = st["raw"]
+                match["source"] = "layout"
+            else:
+                if not any(t.get("raw") == st["raw"] for t in tols):
+                    tols.append({"value": None, "type": "limit", "nominal_in": st["nominal_in"],
+                                 "deviations_in": devs, "band_in": round(st["upper_in"] - st["lower_in"], 4),
+                                 "raw": st["raw"], "source": "layout"})
+    for t in result.get("tolerances", []):
+        if t.get("type") == "fit":
+            _annotate_fit(t)
+    bands = [t["band_in"] for t in result.get("tolerances", []) if t.get("band_in")]
+    if bands:
+        result["tightest_tolerance_in"] = min(bands)
+    return result
+
+
+def _analyze_single_page(page_text, page_num, words=None):
     """Analyze a single page's text and return extracted specs."""
     if len(page_text.strip()) < 10:
         return None  # skip pages with no meaningful text
 
+    materials = find_materials(page_text)
+    # Detect material family for gauge table selection
+    mat_family = None
+    for mat in materials:
+        if mat.get('family') == 'stainless':
+            mat_family = 'stainless'
+            break
+
+    units = detect_units(page_text)
     result = {
         "page": page_num,
-        "materials": find_materials(page_text),
-        "thickness": find_thickness(page_text),
+        "units": units,
+        "materials": materials,
+        "thickness": find_thickness(page_text, material_family=mat_family, units=units),
         "dimensions": find_dimensions(page_text),
         "tolerances": find_tolerances(page_text),
         "bends": find_bends(page_text),
         "finishes": find_finishes(page_text),
         "part_info": find_part_info(page_text),
-        "features": find_features(page_text),
+        "features": find_features(page_text, units),
     }
 
-    result["missing_info"] = identify_missing_info(result)
+    # Coordinate-based enrichment (title block cells, stacked limits, ISO fits)
+    apply_layout(result, words)
+    if drawing_layout is not None and words:
+        try:
+            result["envelope_estimate"] = drawing_layout.estimate_envelope(words, page_text, units)
+        except Exception:
+            pass
 
-    # Determine fab type
-    bend_data = result["bends"]
-    has_bends = len(bend_data.get("radii", [])) > 0 or len(bend_data.get("angles", [])) > 0
-    has_thickness = len(result["thickness"]) > 0
-
-    if has_thickness or has_bends:
-        result["likely_fab_type"] = "sheet_metal"
-        result["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
-    else:
-        # Check if it has any useful drawing data at all
-        has_dims = len(result["dimensions"]) > 0
-        has_materials = len(result["materials"]) > 0
-        if has_dims or has_materials:
-            result["likely_fab_type"] = "unknown"
-            result["fab_type_confidence"] = "low"
-        else:
-            result["likely_fab_type"] = "unknown"
-            result["fab_type_confidence"] = "none"
+    # Determine fab type (machined vs sheet metal) and scrub irrelevant fields
+    finalize_fab_type(result, page_text)
 
     # Build per-page summary
     summary_parts = []
@@ -738,16 +1374,105 @@ def _analyze_single_page(page_text, page_num):
     return result
 
 
+def _analyze_dxf(path, dxf, text, pages):
+    """Build a drawing result from a DXF: geometry is exact, text supplies material/notes."""
+    units = dxf.get("units", "in")
+    materials = find_materials(text)
+    fam = next((m.get("family") for m in materials if m.get("family")), None)
+    result = {
+        "units": units,
+        "materials": materials,
+        "thickness": find_thickness(text, material_family=fam, units=units) if text else [],
+        "dimensions": [],
+        "tolerances": find_tolerances(text) if text else [],
+        "bends": find_bends(text) if text else {"radii": [], "angles": []},
+        "finishes": find_finishes(text) if text else [],
+        "part_info": find_part_info(text) if text else {},
+        "features": [],
+    }
+    # Holes: exact circles from geometry; taps/slots only from text notes
+    for h in dxf.get("holes_in", []):
+        result["features"].append({"type": "round_hole", "count": h["count"], "diameter_in": h["diameter_in"],
+                                   "through": True, "raw": f'DXF circle dia {h["diameter_in"]}"'})
+    if text:
+        for f in find_features(text, units):
+            if f["type"] != "round_hole":
+                result["features"].append(f)
+    # Bends: text callouts first, else one bend per bend line (assumed 90 deg)
+    if not result["bends"]["angles"] and dxf.get("bend_lines"):
+        result["bends"]["angles"] = [{"value_deg": 90.0, "raw": "DXF bend line (angle assumed 90)"}
+                                     for _ in range(dxf["bend_lines"])]
+    # Envelope: pure flat pattern -> geometry extents; full drawing sheet -> largest dimensions
+    n_text = len(dxf.get("texts", []))
+    dims = sorted({d for d in dxf.get("dims_in", []) if 0.25 <= d <= 160}, reverse=True)
+    if n_text > 15 and len(dims) >= 2:
+        result["envelope_estimate"] = {"length_in": dims[0], "width_in": dims[1],
+                                       "is_flat_view": bool(dxf.get("bend_lines")), "source": "dxf_dimensions"}
+    else:
+        bb = dxf["bbox_in"]
+        result["envelope_estimate"] = {"length_in": bb["length_in"], "width_in": bb["width_in"],
+                                       "is_flat_view": True, "source": "dxf_geometry"}
+        result["dxf_cut_length_in"] = dxf.get("cut_length_in")
+    result["dxf_geometry"] = {k: dxf[k] for k in ("units", "cut_length_in", "bbox_in", "holes_in",
+                                                   "bend_lines", "entity_counts")}
+    finalize_fab_type(result, text or "")
+    if result["likely_fab_type"] == "unknown":
+        # a 2D cut profile with no machining evidence is a laser / sheet part
+        result["likely_fab_type"] = "sheet_metal"
+        result["fab_type_confidence"] = "medium"
+        result.setdefault("fab_type_evidence", {}).setdefault("sheet_metal", []).append("2D DXF cut profile")
+        result["missing_info"] = identify_missing_info(result)
+    env = result["envelope_estimate"]
+    parts = []
+    if result["materials"]:
+        parts.append("Material: " + (result["materials"][0].get("name") or result["materials"][0]["raw_callout"]))
+    if result["thickness"]:
+        parts.append(f'Thickness: {result["thickness"][0]["value_in"]}"')
+    parts.append(f'DXF {env["length_in"]}" x {env["width_in"]}"')
+    if result.get("dxf_cut_length_in"):
+        parts.append(f'cut length {result["dxf_cut_length_in"]}"')
+    parts.append(f'{sum(h["count"] for h in dxf.get("holes_in", []))} holes')
+    result.update({
+        "source_file": os.path.basename(path),
+        "file_type": "dxf_drawing",
+        "page_count": 1,
+        "drawing_page_count": 1,
+        "is_scanned": False,
+        "pages": [],
+        "summary": " | ".join(parts),
+    })
+    return result
+
+
 def analyze_drawing(pdf_path):
-    """Main analysis pipeline for a PDF drawing â per-page extraction."""
+    """Main analysis pipeline for a PDF drawing — per-page extraction."""
     if not os.path.isfile(pdf_path):
         return {"error": f"File not found: {pdf_path}"}
 
     ext = os.path.splitext(pdf_path)[1].lower()
-    if ext not in (".pdf",):
-        return {"error": f"Unsupported file type: {ext}. Currently supports PDF."}
+    if ext == ".dwg":
+        return {"error": "DWG is AutoCAD's native binary format and can't be read directly. "
+                         "In AutoCAD/DraftSight use Save As > DXF (or Plot > PDF) and upload that file."}
+    if ext not in (".pdf", ".dxf"):
+        return {"error": f"Unsupported file type: {ext}. Upload a PDF or DXF drawing."}
 
     # 1. Extract text
+    dxf = None
+    if ext == ".dxf":
+        if dxf_reader is None:
+            return {"error": "DXF support is not available on this server."}
+        try:
+            dxf = dxf_reader.read_dxf(pdf_path)
+        except Exception as e:
+            return {"error": f"Failed to read DXF: {e}"}
+        if dxf.get("error"):
+            return {"error": dxf["error"]}
+        full_text = "\n".join(dxf["texts"])
+        pages = [{"page": 1, "text": full_text, "has_text": len(full_text.strip()) > 20}]
+        is_scanned = False
+        if not dxf.get("bbox_in"):
+            return {"error": "No cut geometry found in this DXF."}
+        return _analyze_dxf(pdf_path, dxf, full_text, pages)
     try:
         full_text, pages, is_scanned = extract_text_from_pdf(pdf_path)
     except Exception as e:
@@ -766,10 +1491,20 @@ def analyze_drawing(pdf_path):
             "page_count": len(pages),
         }
 
+    # Word positions for layout-aware parsing (optional; never fatal)
+    page_words = []
+    if drawing_layout is not None and not is_scanned:
+        try:
+            page_words = drawing_layout.get_page_words(pdf_path)
+        except Exception:
+            page_words = []
+
     # 3. Per-page extraction (skip page 1 if it looks like a cover/title page)
     page_results = []
     for pg in pages:
-        page_data = _analyze_single_page(pg["text"], pg["page"])
+        idx = pg["page"] - 1
+        pw = page_words[idx] if idx < len(page_words) else None
+        page_data = _analyze_single_page(pg["text"], pg["page"], pw)
         if page_data is not None:
             # Check if page has meaningful drawing data (not just a title page)
             has_data = (
@@ -782,29 +1517,46 @@ def analyze_drawing(pdf_path):
                 page_results.append(page_data)
 
     # 4. Also run full-document extraction for overall summary
+    all_materials = find_materials(full_text)
+    overall_mat_family = None
+    for mat in all_materials:
+        if mat.get('family') == 'stainless':
+            overall_mat_family = 'stainless'
+            break
+
+    doc_units = detect_units(full_text)
     overall = {
-        "materials": find_materials(full_text),
-        "thickness": find_thickness(full_text),
+        "units": doc_units,
+        "materials": all_materials,
+        "thickness": find_thickness(full_text, material_family=overall_mat_family, units=doc_units),
         "dimensions": find_dimensions(full_text),
         "tolerances": find_tolerances(full_text),
         "bends": find_bends(full_text),
         "finishes": find_finishes(full_text),
         "part_info": find_part_info(full_text),
-        "features": find_features(full_text),
+        "features": find_features(full_text, doc_units),
     }
-    overall["missing_info"] = identify_missing_info(overall)
-
-    # Determine overall fab type
-    bend_data = overall["bends"]
-    has_bends = len(bend_data.get("radii", [])) > 0 or len(bend_data.get("angles", [])) > 0
-    has_thickness = len(overall["thickness"]) > 0
-
-    if has_thickness or has_bends:
-        overall["likely_fab_type"] = "sheet_metal"
-        overall["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
-    else:
-        overall["likely_fab_type"] = "unknown"
-        overall["fab_type_confidence"] = "low"
+    # Layout enrichment across all pages (title block from the first page that has one)
+    all_words = [w for pw in page_words for w in (pw or [])]
+    if page_words:
+        first_tb_words = next((pw for pw in page_words
+                               if pw and drawing_layout.read_title_block(pw)), page_words[0])
+        apply_layout(overall, first_tb_words)
+        try:
+            idx0 = page_words.index(first_tb_words)
+            overall["envelope_estimate"] = drawing_layout.estimate_envelope(
+                first_tb_words, pages[idx0]["text"] if idx0 < len(pages) else full_text, doc_units)
+        except Exception:
+            pass
+        if len(page_words) > 1:
+            # stacked tolerances from the remaining pages
+            extra = {"tolerances": overall["tolerances"]}
+            for pw in page_words:
+                if pw is not first_tb_words:
+                    apply_layout(extra, [w for w in pw])
+            overall["tolerances"] = extra["tolerances"]
+    # Determine overall fab type (machined vs sheet metal)
+    finalize_fab_type(overall, full_text)
 
     # Build overall summary
     summary_parts = []
@@ -817,6 +1569,14 @@ def analyze_drawing(pdf_path):
         t = overall["thickness"][0]
         tk = f"{t['value_in']}\"" + (f" ({t['gauge']} GA)" if t["gauge"] else "")
         summary_parts.append(f"Thickness: {tk}")
+    st = overall.get("machined_stock") or {}
+    if st.get("od_in"):
+        s = f"Stock: {st['od_in']}\" OD"
+        if st.get("overall_length_in"):
+            s += f" x {st['overall_length_in']}\" long"
+        summary_parts.append(s)
+    if overall["part_info"].get("quantity"):
+        summary_parts.append(f"Qty: {overall['part_info']['quantity']}")
     summary_parts.append(f"{len(page_results)} drawing pages")
 
     result = {
@@ -833,7 +1593,7 @@ def analyze_drawing(pdf_path):
     return result
 
 
-# ââ CLI interface ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ── CLI interface ──────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Extract specs from engineering PDF drawings")
