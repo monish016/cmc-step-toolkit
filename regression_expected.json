@@ -219,12 +219,12 @@
    "label": "PDF-05 25-page fabrication package (metric)",
    "kind": "drawing",
    "status": "baseline",
-   "note": "1.5mm sheet callout -> 0.0591in (was wrongly 0.25in)",
+   "note": "1.5mm sheet callout -> 0.0591in (was wrongly 0.25in) Metric units: 2x dia 10.5mm holes were previously dropped (read as 10.5in) - 66 is correct.",
    "checks": {
     "fab": "sheet_metal",
     "pages": 25,
     "thk": 0.0591,
-    "holes": 64,
+    "holes": 66,
     "tapped": 21,
     "units": "mm",
     "priced": false
