@@ -823,6 +823,84 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div style="max-width:800px">
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v4.1 - September 23, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Drawing Pricing, DXF Support, TL-2 Routing</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Sheet-metal PDF drawings are now priced: flat size read from the drawing dimensions (flat-pattern view detected automatically), plus thickness, holes, taps and bends</li>
+            <li>New &quot;Check sizes &amp; re-price&quot; panel on every drawing result - edit flat size, thickness, bends (or OD and length for turned parts) and the price updates</li>
+            <li>One-click Customer Quote PDF for drawings, using any sizes adjusted by the estimator</li>
+            <li>Turned parts route to the Haas TL-2 when they exceed the ST-30 (TL-2: 16 in dia / 48 in length); longer parts flagged as end-for-end with 2 setups</li>
+            <li>Machine capacity limits (ST-30 / TL-2) editable in the Shop Rates tab</li>
+            <li>Metric drawings detected automatically (stated units, comma decimals, mm callouts); hole sizes, stock and thickness converted to inches</li>
+            <li>DXF upload support with a built-in reader: exact cut length, outline size, hole sizes and bend lines from the geometry (inch or mm, blocks supported)</li>
+            <li>DWG uploads now return a clear &quot;save as DXF or PDF&quot; message</li>
+            <li>Fix: Customer Quote PDF priced stainless parts as carbon steel (material dropdown value was not mapped)</li>
+            <li>Fix: Quote PDF / CSV buttons could act on the wrong result when a file in the batch failed</li>
+            <li>Regression suite expanded to 14 files (added 2 DXF test parts); all passing</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v4.0 - September 23, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Regression Tests + Machined-Part Quoting from Drawings</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>New Regression Tests page (/regression): every reported problem file is re-checked against expected values after each deploy</li>
+            <li>Test files matched by content fingerprint, so no customer drawings are stored in the public code repository</li>
+            <li>12 initial test files: 7 STEP parts (incl. PX04 40 holes, P009 9 cutouts, CW230606T no holes) and 5 PDFs</li>
+            <li>Turned parts read from PDF drawings get a cost estimate: bar stock sizing, saw cutoff, CNC turning, tight-tolerance cycle factor</li>
+            <li>Metric sheet thickness callouts read correctly (e.g. 1.5mm SHEET = 0.0591 in; was 0.25 in)</li>
+            <li>Fix: dimensions such as 401 / 1010 no longer mistaken for steel grades</li>
+            <li>Sheet-metal PDF results note that bends without a callout can't be detected from a PDF</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9.3 - September 23, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Drawing Reading by Position + ISO 286 Fits</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Title block read by position: drawing number, part title, material callout, finish, quantity and revision</li>
+            <li>Stacked limit deviations paired with their dimension (e.g. 1.000 F7 with -.001 / -.002)</li>
+            <li>ISO 286 limits and fits table (d-p shafts, D-P holes, IT3-IT13) - fits get their limits even when none are printed</li>
+            <li>Fit check flags printed limits that match the opposite fit (e.g. F7 printed with f7 shaft limits)</li>
+            <li>Tightest tolerance band shown on results and in the PDF report</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9.2 - September 23, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Machined-Part Drawings (Shafts)</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Drawings classified as machined vs sheet metal - shafts no longer show false bends, thickness or flat pattern</li>
+            <li>Raw stock read from the drawing: OD, overall length, turned diameters and stock weight</li>
+            <li>Quantity (&quot;QTY REQUIRED&quot;), finish (&quot;Machined&quot;) and full tolerance block now extracted</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9.1 - September 23, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Drawing Extraction Fixes (Test PDF 1) + Bend-Relief Holes</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Stainless gauge table: 12 GA SS = 0.1094 in (was 0.1046 in from the carbon-steel table)</li>
+            <li>Hole callouts (e.g. 30 x dia 0.17 THRU) and thread specs (M5x0.8) no longer read as part dimensions</li>
+            <li>Tolerance block (ANGULAR: MACH 1 deg BEND 1 deg) no longer counted as bends; full block now listed</li>
+            <li>False M150 tapped hole removed</li>
+            <li>STEP: bend reliefs no longer detected as holes (CW230606T-3037: 4 false holes -> 0)</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9 updates - September 19-22, 2026</div>
+          <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Surface Models, SLDPRT Conversion, Hole Accuracy</div>
+          <ul style="margin:6px 0;padding-left:18px;color:#333">
+            <li>Surface / wireframe STEP files supported</li>
+            <li>SolidWorks SLDPRT files converted to STEP via the Convert3D cloud service</li>
+            <li>Machined parts: pocket over-counting fixed</li>
+            <li>CA260504D-PX04 hole count fixed (40 holes) with a permanent de-duplication fix for bent parts</li>
+            <li>Combined PDF report and results layout for PDF drawings matched to the STEP analysis style</li>
+          </ul>
+        </div>
+
+        <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
           <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9 - September 18, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">SLDPRT/IGES Format Support</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
