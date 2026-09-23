@@ -173,7 +173,7 @@ def _compile_patterns():
         ),
         # Quantity
         "quantity": re.compile(
-            r'(?:QTY|QUANTITY)\s*[:=]?\s*(\d+)'
+            r'(?:QTY|QUANTITY)(?:\s*(?:REQ(?:UIRED|\'?D)?|PER\s+ASS(?:Y|EMBLY)|PER\s+UNIT|ORDERED))?\s*[:=]?\s*(\d+)\b'
             r'|(\d+)\s*(?:PCS?|PIECES?|EA(?:CH)?)\b',
             re.IGNORECASE
         ),
@@ -185,7 +185,7 @@ def _compile_patterns():
         ),
         # Revision
         "revision": re.compile(
-            r'REV\.?\s*[:=]?\s*([A-Z0-9]{1,5})\b',
+            r'\bREV(?:ISION)?\b\.?[ \t]*[:=]?[ \t]*([A-Z0-9]{1,3})\b',
             re.IGNORECASE
         ),
     }
@@ -392,6 +392,53 @@ def find_thickness(text, material_family=None):
     return unique
 
 
+_FIT_LETTERS = r'(?:CD|EF|FG|JS|Z[ABC]|[A-HJKMNP-VX-Z]|cd|ef|fg|js|z[abc]|[a-hjkmnp-vx-z])'
+_FIT_RE = re.compile(
+    r'(?<![\d.])(\d*\.\d{2,4})[ \t]*"?[ \t]+(' + _FIT_LETTERS + r')(\d{1,2})\b'
+)
+
+
+def find_fits(text):
+    """Find ISO limits-and-fits callouts such as '1.000 F7' or '.750 h6'.
+
+    Nearby +/- limit deviations (e.g. '-.001' / '-.002' printed above/below the
+    nominal) are attached when found within a short window.
+    """
+    fits = []
+    seen = set()
+    for m in _FIT_RE.finditer(text):
+        grade = int(m.group(3))
+        if not 1 <= grade <= 18:
+            continue
+        try:
+            nominal = float(m.group(1))
+        except ValueError:
+            continue
+        if nominal <= 0 or nominal > 60:
+            continue
+        cls = m.group(2) + m.group(3)
+        window = text[max(0, m.start() - 25):m.end() + 25]
+        devs = []
+        for dm in re.finditer(r'(?<![\w.])([+\-])\s*(\.\d{3,4}|0\.\d{3,4})\b', window):
+            try:
+                v = float(dm.group(2)) * (-1 if dm.group(1) == '-' else 1)
+                if v not in devs:
+                    devs.append(v)
+            except ValueError:
+                pass
+        devs = devs[:2]
+        raw = f"{m.group(1)} {cls}"
+        if devs:
+            raw += " (" + "/".join(("+" if d >= 0 else "-") + f"{abs(d):.3f}".lstrip("0") for d in devs) + ")"
+        key = (round(nominal, 4), cls.upper())
+        if key in seen:
+            continue
+        seen.add(key)
+        fits.append({"nominal_in": round(nominal, 4), "fit_class": cls,
+                     "deviations_in": devs, "raw": raw})
+    return fits
+
+
 def find_tolerances(text):
     """Extract tolerance specifications."""
     results = []
@@ -444,6 +491,12 @@ def find_tolerances(text):
             })
         except ValueError:
             results.append({"value": None, "raw": dec_m.group(0).strip(), "type": "decimal_places"})
+
+    # ISO fit callouts on machined features (e.g. "1.000 F7" with -.001/-.002 limits)
+    for fit in find_fits(text):
+        results.append({"value": None, "raw": fit["raw"], "type": "fit",
+                        "nominal_in": fit["nominal_in"], "fit_class": fit["fit_class"],
+                        "deviations_in": fit["deviations_in"]})
 
     # Deduplicate by raw text
     seen = set()
@@ -577,8 +630,12 @@ def find_part_info(text):
             break
 
     # Revision
+    REV_STOP = {"QTY", "NO", "DWG", "THE", "AND", "SIZE", "DATE", "BY", "DES", "ECO", "ECN"}
     for m in PATTERNS["revision"].finditer(text):
-        info["revision"] = m.group(1).strip()
+        rv = m.group(1).strip()
+        if rv.upper() in REV_STOP:
+            continue
+        info["revision"] = rv
         break
 
     # Scale
@@ -604,6 +661,24 @@ def find_finishes(text):
             end = min(len(text), idx + len(kw) + 30)
             context = text[start:end].strip()
             found.append({"finish": kw, "context": context})
+
+    # Title-block "FINISH" field (e.g. "FINISH Machined", "FINISH: #4 BRUSHED")
+    FINISH_STOP = {
+        "NEXT", "ASSY", "USED", "ON", "APPLICATION", "DO", "NOT", "SCALE", "DWG", "SIZE",
+        "REV", "DATE", "NAME", "WEIGHT", "SHEET", "MATERIAL", "COMMENTS", "QTY", "TITLE",
+        "TREATMENT", "SPECIFIED", "NOTED", "AS", "SEE", "NO", "NO.", "PART", "JOB", "DRAWN",
+        "CHECKED", "UNLESS", "TOLERANCES", "DIMENSIONS", "THE", "AND", "OR", "OF",
+        "CHICAGO", "METALCRAFT", "IS", "PROHIBITED", "WITHOUT", "WRITTEN", "PERMISSION",
+        "COPYRIGHT", "PROPRIETARY", "CONFIDENTIAL", "INFORMATION", "REPRODUCTION",
+        "INTERPRET", "NOTES", "NOTE", "GENERAL", "ENG", "MFG", "APPR", "APPR.", "Q.A.", "CUSTOMER", "APPROVAL",
+    }
+    for m in re.finditer(r'\bFINISH\b\s*[:\-]?[ \t]*\n?[ \t]*([A-Za-z#][\w#\-/]*)', text, re.IGNORECASE):
+        word = m.group(1).strip()
+        if word.upper() in FINISH_STOP or len(word) < 2:
+            continue
+        found.append({"finish": word.capitalize() if word.isalpha() else word,
+                      "context": m.group(0).strip(), "source": "title_block"})
+        break
 
     # Deduplicate by finish keyword
     seen = set()
@@ -794,6 +869,165 @@ def find_features(text):
     return unique
 
 
+# ── Machined vs sheet-metal classification ─────────────────────────────
+
+_TOL_BLOCK_RE = re.compile(
+    r'(?:UNLESS\s+OTHERWISE\s+(?:SPECIFIED|NOTED|STATED)[:\s]*'
+    r'|ANGULAR\s*:\s*.*'
+    r'|(?:MACH|BEND)\s*\d{1,2}\s*°.*'
+    r'|FRACTIONAL\s+\d.*'
+    r'|(?:TWO|THREE|ONE|FOUR)\s+PLACE\s+DECIMAL.*'
+    r'|TOLERANCES?\s*:\s*.*'
+    r'|INTERPRET\s+GEOMETRIC.*'
+    r'|DIMENSIONS\s+ARE\s+IN\s+.*)',
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def classify_drawing(text, thickness, bends, fits):
+    """Score the drawing text for machined vs sheet-metal evidence.
+
+    Standard title-block text (e.g. 'ANGULAR: MACH 1° BEND 1°') appears on
+    every drawing and is stripped before scoring so it can't vote either way.
+    Returns (fab_type, confidence, evidence dict).
+    """
+    clean = _TOL_BLOCK_RE.sub(' ', text)
+    up = clean.upper()
+    mach, sheet = 0, 0
+    ev = {"machined": [], "sheet_metal": []}
+
+    def add(kind, pts, why):
+        nonlocal mach, sheet
+        if kind == "m":
+            mach += pts
+            ev["machined"].append(why)
+        else:
+            sheet += pts
+            ev["sheet_metal"].append(why)
+
+    # --- machined evidence ---
+    if fits:
+        add("m", 3, "fit callout " + ", ".join(f["fit_class"] for f in fits[:3]))
+    if re.search(r'\d\s*"?\s*O\.?D\.?\b', up):
+        add("m", 2, "OD callout")
+    m = re.search(r'\b(SHAFTS?|SPINDLE|AXLE|BUSHING|SLEEVE|COLLAR|SPACER|HUB|JOURNAL|STUD|DOWEL|ARBOR|MANDREL|PULLEY|SPROCKET|GEAR)\b', up)
+    if m:
+        add("m", 2, f"part noun '{m.group(1)}'")
+    if re.search(r'\b(KEYWAY|KEYSEAT|KEY\s*SEAT|SNAP\s*RING\s*GROOVE|RETAINING\s*RING\s*GROOVE|UNDERCUT|KNURL|CENTER\s*DRILL|TURN(?:ED)?\b|LATHE|GRIND|GROUND)\b', up):
+        add("m", 2, "turning/milling feature")
+    if re.search(r'\bFINISH\b\s*[:\-]?\s*MACHINED\b|\bAS\s+MACHINED\b|\bMACHINED\s+FINISH\b', up):
+        add("m", 2, "finish = machined")
+    if re.search(r'\b\d{1,3}\s*(?:RA|RMS|µIN|MICRO\s*IN)\b|√', up):
+        add("m", 2, "surface roughness callout")
+    if re.search(r'\b(ROUND\s+BAR|BAR\s+STOCK|RD\s+BAR|ROD\b|HEX\s+BAR|SOLID\s+BAR|PLATE\s+STOCK|BILLET)', up):
+        add("m", 2, "bar/billet stock")
+    if re.search(r'\bTHRU\s+(?:BORE|BORED)|\bC\'?BORE\b|\bBORE\b', up):
+        add("m", 1, "bore")
+
+    # --- sheet metal evidence ---
+    if thickness:
+        t0 = thickness[0]
+        if t0.get("gauge") or "THK" in str(t0.get("raw", "")).upper() or "THICK" in str(t0.get("raw", "")).upper():
+            add("s", 3, f"thickness/gauge '{t0.get('raw')}'")
+    if re.search(r'\b(?:UP|DN|DOWN)\s*\d{1,3}\s*°|\bBEND\s*(?:LINE|RADIUS|RAD\b|R\b)|INSIDE\s+RAD|\bFLAT\s+PATTERN\b|K-?\s*FACTOR|\bFORMED\b|\bPRESS\s*BRAKE\b|\bBRAKE\b|\bHEM(?:MED)?\b', up):
+        add("s", 3, "bend/flat-pattern notation")
+    n_ang = len((bends or {}).get("angles", []))
+    if n_ang:
+        add("s", min(2, n_ang), f"{n_ang} bend angle(s)")
+    if re.search(r'\bSHEET\s+METAL\b|\bSHT\s*MTL\b|\bLASER\s+CUT\b|\bPUNCH(?:ED)?\b', up):
+        add("s", 2, "sheet-metal process note")
+
+    if mach >= 3 and mach > sheet:
+        conf = "high" if mach - sheet >= 4 else "medium"
+        return "machined", conf, ev
+    if sheet > 0:
+        conf = "high" if sheet >= 4 else "medium"
+        return "sheet_metal", conf, ev
+    return "unknown", "low", ev
+
+
+def find_machined_stock(text, fits=None, density_gcc=None):
+    """Estimate raw stock for a machined (turned) part: OD, ID and overall length."""
+    clean = _TOL_BLOCK_RE.sub(' ', text)
+    DIA = r'[∅Ø⌀]'
+    diameters = []
+    for m in re.finditer(r'(?<![\d.])(\d*\.\d+|\d+)\s*"?\s*O\.?D\.?\b', clean, re.IGNORECASE):
+        try:
+            diameters.append(float(m.group(1)))
+        except ValueError:
+            pass
+    for m in re.finditer(DIA + r'\s*(\d*\.\d+)(?!\s*(?:"|IN)?\s*(?:THRU|DP|DEEP|X))', clean, re.IGNORECASE):
+        try:
+            diameters.append(float(m.group(1)))
+        except ValueError:
+            pass
+    for f in fits or []:
+        diameters.append(f["nominal_in"])
+    diameters = [d for d in diameters if 0.05 <= d <= 30]
+
+    ids = []
+    for m in re.finditer(r'(?<![\d.])(\d*\.\d+|\d+)\s*"?\s*I\.?D\.?\b', clean, re.IGNORECASE):
+        try:
+            ids.append(float(m.group(1)))
+        except ValueError:
+            pass
+
+    # Overall length = largest 3-place decimal dimension on the sheet
+    # (skip signed limit deviations like -.001 and title-block tolerance values)
+    lengths = []
+    for m in re.finditer(r'(?<![\d.+\-/])(\d{1,3}\.\d{3})(?![\d])', clean):
+        try:
+            lengths.append(float(m.group(1)))
+        except ValueError:
+            pass
+    od = max(diameters) if diameters else None
+    overall_len = max(lengths) if lengths else None
+    if od and overall_len and overall_len < od:
+        overall_len = None
+
+    stock = {
+        "stock_shape": "round_bar" if od else "unknown",
+        "od_in": round(od, 4) if od else None,
+        "id_in": round(max(ids), 4) if ids else None,
+        "overall_length_in": round(overall_len, 3) if overall_len else None,
+        "diameters_in": sorted(set(round(d, 4) for d in diameters), reverse=True),
+    }
+    if od and overall_len:
+        import math
+        area = math.pi / 4 * (od ** 2 - (stock["id_in"] or 0) ** 2)
+        vol = area * overall_len
+        stock["stock_volume_in3"] = round(vol, 2)
+        if density_gcc:
+            stock["stock_weight_lb"] = round(vol * density_gcc * 0.0361273, 2)
+    return stock
+
+
+def finalize_fab_type(result, text):
+    """Decide fab type and scrub sheet-metal-only fields from machined parts."""
+    fits = [t for t in result.get("tolerances", []) if t.get("type") == "fit"]
+    fab, conf, ev = classify_drawing(text, result.get("thickness"), result.get("bends"), fits)
+    result["likely_fab_type"] = fab
+    result["fab_type_confidence"] = conf
+    result["fab_type_evidence"] = ev
+    if fab == "machined":
+        # Bends / gauge don't apply to a machined part
+        result["bends"] = {"radii": [], "angles": []}
+        result["thickness"] = [t for t in result.get("thickness", [])
+                               if "inferred" not in str(t.get("raw", ""))]
+        density = None
+        for mat in result.get("materials", []):
+            if mat.get("density_gcc"):
+                density = mat["density_gcc"]
+                break
+        result["machined_stock"] = find_machined_stock(
+            text, [{"nominal_in": f["nominal_in"]} for f in fits], density)
+    elif fab == "unknown":
+        has_dims = bool(result.get("dimensions")) or bool(result.get("materials"))
+        result["fab_type_confidence"] = "low" if has_dims else "none"
+    result["missing_info"] = identify_missing_info(result)
+    return result
+
+
 def identify_missing_info(result):
     """Flag what's missing that Sales would need to ask about."""
     missing = []
@@ -804,7 +1038,14 @@ def identify_missing_info(result):
             "message": "No material callout found on drawing. Ask customer for material specification."
         })
 
-    if not result.get("thickness"):
+    if result.get("likely_fab_type") == "machined":
+        st = result.get("machined_stock") or {}
+        if not (st.get("od_in") and st.get("overall_length_in")):
+            missing.append({
+                "field": "Stock size",
+                "message": "Could not determine raw stock (OD x length). Confirm bar/billet size."
+            })
+    elif not result.get("thickness"):
         missing.append({
             "field": "Thickness",
             "message": "No sheet thickness or gauge found. Ask customer for material thickness."
@@ -856,26 +1097,8 @@ def _analyze_single_page(page_text, page_num):
         "features": find_features(page_text),
     }
 
-    result["missing_info"] = identify_missing_info(result)
-
-    # Determine fab type
-    bend_data = result["bends"]
-    has_bends = len(bend_data.get("radii", [])) > 0 or len(bend_data.get("angles", [])) > 0
-    has_thickness = len(result["thickness"]) > 0
-
-    if has_thickness or has_bends:
-        result["likely_fab_type"] = "sheet_metal"
-        result["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
-    else:
-        # Check if it has any useful drawing data at all
-        has_dims = len(result["dimensions"]) > 0
-        has_materials = len(result["materials"]) > 0
-        if has_dims or has_materials:
-            result["likely_fab_type"] = "unknown"
-            result["fab_type_confidence"] = "low"
-        else:
-            result["likely_fab_type"] = "unknown"
-            result["fab_type_confidence"] = "none"
+    # Determine fab type (machined vs sheet metal) and scrub irrelevant fields
+    finalize_fab_type(result, page_text)
 
     # Build per-page summary
     summary_parts = []
@@ -965,19 +1188,8 @@ def analyze_drawing(pdf_path):
         "part_info": find_part_info(full_text),
         "features": find_features(full_text),
     }
-    overall["missing_info"] = identify_missing_info(overall)
-
-    # Determine overall fab type
-    bend_data = overall["bends"]
-    has_bends = len(bend_data.get("radii", [])) > 0 or len(bend_data.get("angles", [])) > 0
-    has_thickness = len(overall["thickness"]) > 0
-
-    if has_thickness or has_bends:
-        overall["likely_fab_type"] = "sheet_metal"
-        overall["fab_type_confidence"] = "high" if (has_thickness and has_bends) else "medium"
-    else:
-        overall["likely_fab_type"] = "unknown"
-        overall["fab_type_confidence"] = "low"
+    # Determine overall fab type (machined vs sheet metal)
+    finalize_fab_type(overall, full_text)
 
     # Build overall summary
     summary_parts = []
@@ -990,6 +1202,14 @@ def analyze_drawing(pdf_path):
         t = overall["thickness"][0]
         tk = f"{t['value_in']}\"" + (f" ({t['gauge']} GA)" if t["gauge"] else "")
         summary_parts.append(f"Thickness: {tk}")
+    st = overall.get("machined_stock") or {}
+    if st.get("od_in"):
+        s = f"Stock: {st['od_in']}\" OD"
+        if st.get("overall_length_in"):
+            s += f" x {st['overall_length_in']}\" long"
+        summary_parts.append(s)
+    if overall["part_info"].get("quantity"):
+        summary_parts.append(f"Qty: {overall['part_info']['quantity']}")
     summary_parts.append(f"{len(page_results)} drawing pages")
 
     result = {

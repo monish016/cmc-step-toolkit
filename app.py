@@ -1228,7 +1228,9 @@ function renderCostEstimate(cost) {
 
 function renderDrawingResult(r, idx) {
   const d = r.drawing_data;
-  const fabLabel = d.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (d.likely_fab_type === 'unknown' ? 'Unknown' : d.likely_fab_type);
+  const fabLabel = d.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (d.likely_fab_type === 'machined' ? 'Machined' : 'Unknown');
+  const isMachined = d.likely_fab_type === 'machined';
+  const stk = d.machined_stock || {};
   const confColor = d.fab_type_confidence === 'high' ? '#2a5a2a' : (d.fab_type_confidence === 'medium' ? '#b8860b' : '#888');
   const hasPages = d.pages && d.pages.length > 0;
   const drawingPageCount = d.drawing_page_count || (hasPages ? d.pages.length : 0);
@@ -1273,8 +1275,15 @@ function renderDrawingResult(r, idx) {
 
   html += '<div class="geo-grid">';
   if (dimsDisplay) html += '<div class="geo-stat"><div class="value">' + dimsDisplay + '</div><div class="label">Overall Dimensions</div></div>';
-  if (thkDisplay) html += '<div class="geo-stat"><div class="value">' + thkDisplay + '</div><div class="label">Sheet Thickness</div></div>';
-  html += '<div class="geo-stat"><div class="value">' + (cf.num_bends || 0) + '</div><div class="label">Bends</div></div>';
+  if (isMachined) {
+    if (stk.od_in) html += '<div class="geo-stat"><div class="value">' + stk.od_in + '"</div><div class="label">Stock OD</div></div>';
+    if (stk.overall_length_in) html += '<div class="geo-stat"><div class="value">' + stk.overall_length_in + '"</div><div class="label">Overall Length</div></div>';
+    if (stk.stock_weight_lb) html += '<div class="geo-stat"><div class="value">' + stk.stock_weight_lb + ' lb</div><div class="label" title="Raw bar stock weight before machining">Stock Weight</div></div>';
+  } else {
+    if (thkDisplay) html += '<div class="geo-stat"><div class="value">' + thkDisplay + '</div><div class="label">Sheet Thickness</div></div>';
+    html += '<div class="geo-stat"><div class="value">' + (cf.num_bends || 0) + '</div><div class="label">Bends</div></div>';
+  }
+  if (d.part_info && d.part_info.quantity) html += '<div class="geo-stat"><div class="value">' + d.part_info.quantity + '</div><div class="label">Qty Required</div></div>';
   if (matDisplay) html += '<div class="geo-stat"><div class="value" style="font-size:0.85rem">' + matDisplay + '</div><div class="label">Material</div></div>';
   if (cf.flat_width_in) html += '<div class="geo-stat"><div class="value">' + cf.flat_width_in + '"</div><div class="label" title="Developed width after unfolding all bends">Flat/Dev Width</div></div>';
   if (cf.flat_length_in) html += '<div class="geo-stat"><div class="value">' + cf.flat_length_in + '"</div><div class="label" title="Length along the bend axis">Flat/Dev Length</div></div>';
@@ -1291,7 +1300,11 @@ function renderDrawingResult(r, idx) {
     var uniqTol = [];
     var seenTol = {};
     d.tolerances.forEach(function(t) { if (t.raw && !seenTol[t.raw]) { seenTol[t.raw] = true; uniqTol.push(t.raw); }});
-    if (uniqTol.length) html += '<tr><th>Tolerances</th><td>' + uniqTol.slice(0,5).join(', ') + '</td></tr>';
+    if (uniqTol.length) html += '<tr><th>Tolerances</th><td>' + uniqTol.slice(0,10).join(', ') + '</td></tr>';
+  }
+  if (isMachined) {
+    if (stk.od_in) html += '<tr><th>Raw stock</th><td>Round bar ' + stk.od_in + '" OD' + (stk.id_in ? ' / ' + stk.id_in + '" ID' : '') + (stk.overall_length_in ? ' x ' + stk.overall_length_in + '" long' : '') + '</td></tr>';
+    if (stk.diameters_in && stk.diameters_in.length > 1) html += '<tr><th>Turned diameters</th><td>' + stk.diameters_in.map(function(v){return v + '"';}).join(', ') + '</td></tr>';
   }
   if (d.finishes && d.finishes.length) {
     html += '<tr><th>Finish</th><td>' + d.finishes.map(function(f){return f.finish;}).join(', ') + '</td></tr>';
@@ -1348,7 +1361,7 @@ function renderDrawingResult(r, idx) {
       const pgId = 'pg-' + idx + '-' + pgIdx;
       const pgPart = (pg.part_info && pg.part_info.part_number) ? pg.part_info.part_number : '';
       const pgMat = (pg.materials && pg.materials.length) ? (pg.materials[0].name || pg.materials[0].raw_callout) : '';
-      const pgFab = pg.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (pg.likely_fab_type || 'Unknown');
+      const pgFab = pg.likely_fab_type === 'sheet_metal' ? 'Sheet Metal' : (pg.likely_fab_type === 'machined' ? 'Machined' : 'Unknown');
       const pgConf = pg.fab_type_confidence === 'high' ? '#2a5a2a' : (pg.fab_type_confidence === 'medium' ? '#b8860b' : '#888');
       const pgLabel = pgPart ? ('Page ' + pg.page + ' - ' + pgPart) : ('Page ' + pg.page);
 
@@ -1390,7 +1403,7 @@ function renderDrawingResult(r, idx) {
         const uniqTol = [];
         const seenTol = {};
         pg.tolerances.forEach(function(t) { if (t.raw && !seenTol[t.raw]) { seenTol[t.raw] = true; uniqTol.push(t.raw); }});
-        if (uniqTol.length) html += '<tr><th>Tolerances</th><td>' + uniqTol.slice(0,5).join(', ') + '</td></tr>';
+        if (uniqTol.length) html += '<tr><th>Tolerances</th><td>' + uniqTol.slice(0,10).join(', ') + '</td></tr>';
       }
       const pgBends = pg.bends || {};
       if (pgBends.radii && pgBends.radii.length) {
@@ -1467,6 +1480,12 @@ function exportDrawingCSV(idx) {
     rows.push(["Dimensions", dm.length + ' x ' + dm.width + (dm.height ? ' x ' + dm.height : '')]);
   }
   var cf = d._computed_flat || {};
+  var ms = d.machined_stock || {};
+  if (ms.od_in) rows.push(["Stock OD (in)", ms.od_in]);
+  if (ms.overall_length_in) rows.push(["Overall Length (in)", ms.overall_length_in]);
+  if (ms.stock_weight_lb) rows.push(["Stock Weight (lb)", ms.stock_weight_lb]);
+  if (d.part_info && d.part_info.quantity) rows.push(["Qty Required", d.part_info.quantity]);
+  if (d.tolerances && d.tolerances.length) rows.push(["Tolerances", d.tolerances.map(function(t){return t.raw;}).join('; ')]);
   if (cf.num_bends) rows.push(["Bends", cf.num_bends]);
   if (cf.flat_width_in) rows.push(["Flat Width (in)", cf.flat_width_in]);
   if (cf.flat_length_in) rows.push(["Flat Length (in)", cf.flat_length_in]);
@@ -1977,7 +1996,7 @@ def _generate_drawing_page_report(page_data, output_path, source_filename):
         rows.append(["Dimensions", dims])
 
     if page_data.get("tolerances"):
-        tols = ", ".join(t["raw"] for t in page_data["tolerances"][:5] if t.get("raw"))
+        tols = ", ".join(t["raw"] for t in page_data["tolerances"][:10] if t.get("raw"))
         if tols:
             rows.append(["Tolerances", tols])
 
@@ -2318,6 +2337,20 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
         dim_str = f'{dm0["length"]}" x {dm0["width"]}"'
         if dm0.get("height"): dim_str += f' x {dm0["height"]}"'
         rows.append(["Overall Dimensions", dim_str])
+    stk = drawing_data.get("machined_stock") or {}
+    if stk.get("od_in"):
+        s_txt = f'Round bar {stk["od_in"]}" OD'
+        if stk.get("id_in"):
+            s_txt += f' / {stk["id_in"]}" ID'
+        if stk.get("overall_length_in"):
+            s_txt += f' x {stk["overall_length_in"]}" long'
+        rows.append(["Raw Stock", s_txt])
+        if stk.get("stock_weight_lb"):
+            rows.append(["Stock Weight", f'{stk["stock_weight_lb"]} lb'])
+        if len(stk.get("diameters_in") or []) > 1:
+            rows.append(["Turned Diameters", ", ".join(f'{v}"' for v in stk["diameters_in"])])
+    if drawing_data.get("part_info", {}).get("quantity"):
+        rows.append(["Qty Required", str(drawing_data["part_info"]["quantity"])])
     if computed.get("flat_width_in"):
         rows.append(["Developed Width", f'{computed["flat_width_in"]}"'])
     if computed.get("flat_length_in"):
@@ -2328,7 +2361,7 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
         rows.append(["Bend Radius", f'{computed.get("bend_radius_in", 0)}"'])
         rows.append(["K-factor", str(computed.get("k_factor", 0.44))])
     if drawing_data.get("tolerances"):
-        tols = ", ".join(t["raw"] for t in drawing_data["tolerances"][:5] if t.get("raw"))
+        tols = ", ".join(t["raw"] for t in drawing_data["tolerances"][:10] if t.get("raw"))
         if tols: rows.append(["Tolerances", tols])
     if drawing_data.get("finishes"):
         rows.append(["Finish", ", ".join(f["finish"] for f in drawing_data["finishes"])])
@@ -2418,7 +2451,7 @@ def _generate_drawing_overall_report(drawing_data, flat_pattern_path, out_path, 
                 )
                 pg_rows.append(["Dimensions", dims])
             if pg.get("tolerances"):
-                tols = ", ".join(t["raw"] for t in pg["tolerances"][:5] if t.get("raw"))
+                tols = ", ".join(t["raw"] for t in pg["tolerances"][:10] if t.get("raw"))
                 if tols: pg_rows.append(["Tolerances", tols])
             bends = pg.get("bends", {})
             if bends.get("radii"):
@@ -2782,7 +2815,8 @@ def analyze():
         # Generate flat pattern image from drawing data
         flat_path = os.path.join(job_dir, "flat_pattern.png")
         try:
-            _generate_drawing_flat_pattern(drawing_data, flat_path)
+            if drawing_data.get("likely_fab_type") != "machined":
+                _generate_drawing_flat_pattern(drawing_data, flat_path)
         except Exception as fp_err:
             print(f"Warning: Failed to generate drawing flat pattern: {fp_err}")
 
