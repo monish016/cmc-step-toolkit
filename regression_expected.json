@@ -1,0 +1,224 @@
+{
+ "version": 1,
+ "updated": "2026-09-24",
+ "tolerance": {
+  "abs": 0.001,
+  "rel": 0.003
+ },
+ "fixtures": {
+  "b6c642514b34fec65e3c72c3367775af49ce0576f478f1dc069565f7d2f5d8ed": {
+   "label": "STEP-01 12GA bracket, 2 bends",
+   "kind": "step",
+   "status": "baseline",
+   "note": "",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.105,
+    "gauge": 12,
+    "bends": 2,
+    "angles": [
+     45,
+     90
+    ],
+    "flat_w": 12.232,
+    "flat_l": 8,
+    "f_square_or_rect": 6,
+    "f_round": 4
+   }
+  },
+  "9b2872ad3f7d456a3032b7ee339e957b29fdf3d205e9e10dca99dcd4f23534a5": {
+   "label": "STEP-02 12GA bracket rev B",
+   "kind": "step",
+   "status": "baseline",
+   "note": "False-hole fix (aspect-ratio filter) - no slot/notch should appear",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.105,
+    "gauge": 12,
+    "bends": 2,
+    "angles": [
+     45,
+     90
+    ],
+    "flat_w": 12.232,
+    "flat_l": 8,
+    "f_square_or_rect": 8,
+    "f_round": 4
+   }
+  },
+  "e683faf5f870a36d93fb62436809cb35dc14f8f97390e43daf5e6c2a5085a614": {
+   "label": "STEP-03 1/4in bracket",
+   "kind": "step",
+   "status": "baseline",
+   "note": "",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.25,
+    "bends": 1,
+    "angles": [
+     90
+    ],
+    "flat_w": 4.034,
+    "flat_l": 3,
+    "f_round": 7
+   }
+  },
+  "a8bcbcf50919476efcb48348e822a6f297a046ae0df5ee60519f1a679964bca8": {
+   "label": "STEP-04 large 12GA panel, 40 holes",
+   "kind": "step",
+   "status": "verified",
+   "note": "Shane: 40 cut features",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.105,
+    "gauge": 12,
+    "bends": 2,
+    "angles": [
+     45,
+     90
+    ],
+    "flat_w": 104.027,
+    "flat_l": 102,
+    "f_square_or_rect": 17,
+    "f_round": 23,
+    "f_total": 40
+   }
+  },
+  "f99f7663378b4bc2b3725cc45d83850840c4df2175fb34c0941457c35c895b44": {
+   "label": "STEP-05 small 12GA tab",
+   "kind": "step",
+   "status": "baseline",
+   "note": "",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.105,
+    "gauge": 12,
+    "bends": 1,
+    "angles": [
+     90
+    ],
+    "flat_w": 10.81,
+    "flat_l": 1.25,
+    "f_slot": 1,
+    "f_round": 2
+   }
+  },
+  "3c755d63783040e1886fb29e3646993aad27ede72f2ccd18732c70342d31ee8f": {
+   "label": "STEP-06 12GA channel, 9 cutouts",
+   "kind": "step",
+   "status": "verified",
+   "note": "Shane: 9 cut features (was 13)",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.105,
+    "gauge": 12,
+    "bends": 4,
+    "angles": [
+     60,
+     90,
+     90,
+     90
+    ],
+    "flat_w": 20.87,
+    "flat_l": 3.727,
+    "f_square_or_rect": 9,
+    "f_total": 9
+   }
+  },
+  "0bd76315e4fdd5f38e159f97f97fc8e765522b20a08670ad1a2e67f98225c2df": {
+   "label": "STEP-07 10GA part with bend reliefs, no holes",
+   "kind": "step",
+   "status": "verified",
+   "note": "Shane: no holes (bend reliefs were detected as 4 false holes)",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.135,
+    "gauge": 10,
+    "bends": 3,
+    "angles": [
+     60,
+     60,
+     60
+    ],
+    "flat_w": 34.573,
+    "flat_l": 25.438,
+    "f_total": 0
+   }
+  },
+  "c94b789885ff75f0e1076101d1bb0e6a4702bfc1e706da9773514b1cba565b67": {
+   "label": "PDF-01 machined shaft (Shane test PDF 2)",
+   "kind": "drawing",
+   "status": "verified",
+   "note": "Shane: bends must be 0, no 1-degree bends, full tolerance block",
+   "checks": {
+    "fab": "machined",
+    "bends": 0,
+    "thk": null,
+    "qty": 2,
+    "finish0": "Machined",
+    "mat": "AISI 304",
+    "fits": [
+     "1.000 F7 (-.001/-.002)"
+    ],
+    "od": 1.9,
+    "len": 49.75,
+    "tight": 0.001,
+    "part_h": "67e6373eecbd2f25"
+   }
+  },
+  "7d511e5613c601e5d0d833ee964367b1d0a01648971c8e0746038d30a95c16d7": {
+   "label": "PDF-02 12GA SS panel (Shane test PDF 1)",
+   "kind": "drawing",
+   "status": "verified",
+   "note": "Shane: 12GA SS = .1094, no false 30x0.17 dimension, no 1-degree bends, no M150 tap. Drawing shows 5 bends but only 4 are called out.",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.1094,
+    "gauge": 12,
+    "bends": 4,
+    "holes": 37,
+    "tapped": 1,
+    "fits": [],
+    "mat": "12 GAGE SHEET, SS304",
+    "part_h": "327d50ce680b63d7"
+   }
+  },
+  "c0cde38f1ea7e35ab8f0676175f56811cba1365db435c04844178e4e282ee115": {
+   "label": "PDF-03 customer bracket (Rapak title block)",
+   "kind": "drawing",
+   "status": "baseline",
+   "note": "",
+   "checks": {
+    "fab": "sheet_metal",
+    "thk": 0.25,
+    "rev": "A",
+    "mat": "T303/304 SS",
+    "finish0": "63 RMS",
+    "holes": 7,
+    "part_h": "a557d3fb09de21ea"
+   }
+  },
+  "de44c519acf4ddbf5167674dfa0d0e9911d51e5e18a6aa07b4d15a94520ff9cd": {
+   "label": "PDF-04 scanned drawing (no text layer)",
+   "kind": "drawing",
+   "status": "baseline",
+   "note": "Must fail gracefully with a clear message",
+   "checks": {
+    "error_contains": "scanned"
+   }
+  },
+  "a874c1d9c40bad1efbcce5e441f786d6814e729991fc8bfc73d2d2b4f3e24958": {
+   "label": "PDF-05 25-page fabrication package (metric)",
+   "kind": "drawing",
+   "status": "baseline",
+   "note": "1.5mm sheet callout -> 0.0591in (was wrongly 0.25in)",
+   "checks": {
+    "fab": "sheet_metal",
+    "pages": 25,
+    "thk": 0.0591,
+    "holes": 64,
+    "tapped": 21
+   }
+  }
+ }
+}

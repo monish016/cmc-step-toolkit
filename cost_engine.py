@@ -336,6 +336,10 @@ DEFAULT_CONFIG = {
         "tm2p_x": 16.0, "tm2p_y": 12.0, "tm2p_z": 16.0,
     },
 
+    # ── Tight-tolerance cycle factor (machined parts) ─────────────
+    # [max tolerance band (in), cycle-time multiplier] - first match wins
+    "tolerance_cycle_factor": [[0.0005, 1.50], [0.001, 1.25], [0.002, 1.10]],
+
     # ── Markups & Minimums ────────────────────────────────────────
     "minimum_order_charge": 75.00,
     "rush_premium_pct": 50,
@@ -404,6 +408,29 @@ def _get_ramp_factor(qty, config=None):
             return prev_r + frac * (r - prev_r)
         prev_q, prev_r = q, r
     return 1.0
+
+
+def _tolerance_factor(band_in, config=None):
+    """Cycle-time multiplier for tight tolerance bands (None -> 1.0)."""
+    if not band_in:
+        return 1.0
+    try:
+        for max_band, factor in _cfg(config, "tolerance_cycle_factor"):
+            if band_in <= max_band + 1e-9:
+                return float(factor)
+    except Exception:
+        pass
+    return 1.0
+
+
+def _machined_route(geometry, dims, config=None):
+    """Pick turning vs milling for a machined part. Returns (op_key, mrr_key)."""
+    l, w, h = dims.get("length", 0), dims.get("width", 0), dims.get("height", 0)
+    sd = sorted([l, w, h], reverse=True)
+    aspect = sd[0] / max(sd[1], 0.01) if sd[0] > 0 and sd[1] > 0 else 1.0
+    if geometry.get("turning_hint") or (aspect > 2.0 and max(sd[1], sd[2]) <= 12.5):
+        return "st30_turning", "mrr_turning"
+    return "tm2p_milling", "mrr_milling"
 
 
 def _find_nearest(table_keys, value):
@@ -962,30 +989,35 @@ def estimate_cost(geometry, material_str, quantity=1, config=None):
         })
 
         # 2. CNC operation
-        l = dims.get("length", 0)
-        w = dims.get("width", 0)
-        h = dims.get("height", 0)
-        sorted_dims = sorted([l, w, h], reverse=True)
-        if sorted_dims[0] > 0 and sorted_dims[1] > 0:
-            aspect = sorted_dims[0] / max(sorted_dims[1], 0.01)
-        else:
-            aspect = 1.0
-
-        if aspect > 2.0 and max(sorted_dims[1], sorted_dims[2]) <= 12.5:
-            op_key = "st30_turning"
-            op_name = "CNC Turning (Haas ST-30)"
-            mrr_table = _cfg(C, "mrr_turning")
-            mrr = mrr_table.get(material, 1.8)
-        else:
-            op_key = "tm2p_milling"
-            op_name = "CNC Milling (Haas TM-2P)"
-            mrr_table = _cfg(C, "mrr_milling")
-            mrr = mrr_table.get(material, 0.8)
+        op_key, mrr_key = _machined_route(geometry, dims, C)
+        op_name = "CNC Turning (Haas ST-30)" if op_key == "st30_turning" else "CNC Milling (Haas TM-2P)"
+        mrr = _cfg(C, mrr_key).get(material, 1.8 if op_key == "st30_turning" else 0.8)
 
         if volume_removed > 0 and mrr > 0:
             cycle = (volume_removed / mrr) / 60.0
         else:
             cycle = 0.25
+
+        # Tight tolerances slow the finishing passes down
+        tol_band = geometry.get("tightest_tolerance_in")
+        tol_factor = _tolerance_factor(tol_band, C)
+        if tol_factor > 1.0:
+            cycle *= tol_factor
+            warnings.append(f"Tight tolerance band {tol_band}\" - turning cycle x{tol_factor:.2f}"
+                            + (" (grinding may be required)" if tol_band <= 0.0005 else ""))
+
+        # Lathe capacity (ST-30 travel)
+        if op_key == "st30_turning":
+            cap = _cfg(C, "machine_capacity")
+            part_len = max(dims.get("length", 0), dims.get("width", 0), dims.get("height", 0))
+            part_dia = sorted([dims.get("length", 0), dims.get("width", 0), dims.get("height", 0)])[1]
+            if part_len > cap.get("st30_z", 26.0):
+                warnings.append(f"Part length {part_len:.2f}\" exceeds ST-30 Z travel "
+                                f"({cap.get('st30_z', 26.0)}\") - route to TL-2 / verify with shop")
+            if part_dia > cap.get("st30_x", 12.5):
+                warnings.append(f"Diameter {part_dia:.2f}\" exceeds ST-30 capacity ({cap.get('st30_x', 12.5)}\")")
+        for note in geometry.get("cost_assumptions", []) or []:
+            warnings.append("Assumption: " + note)
 
         setup = setup_times.get(op_key, 0.65)
         rate = rates.get(op_key, 150.0)
@@ -1252,23 +1284,11 @@ def estimate_cost_simple(geometry, material_str, quantity=1, config=None):
         total_cost += s_total * rates.get("sawing", 125.0)
 
         volume = geometry.get("volume_in3", 0.0) or 0.0
-        l = dims.get("length", 0)
-        w = dims.get("width", 0)
-        h = dims.get("height", 0)
-        sorted_dims = sorted([l, w, h], reverse=True)
-        if sorted_dims[0] > 0 and sorted_dims[1] > 0:
-            aspect = sorted_dims[0] / max(sorted_dims[1], 0.01)
-        else:
-            aspect = 1.0
-
-        if aspect > 2.0 and max(sorted_dims[1], sorted_dims[2]) <= 12.5:
-            op_key = "st30_turning"
-            mrr = _cfg(C, "mrr_turning").get(material, 1.8)
-        else:
-            op_key = "tm2p_milling"
-            mrr = _cfg(C, "mrr_milling").get(material, 0.8)
+        op_key, mrr_key = _machined_route(geometry, dims, C)
+        mrr = _cfg(C, mrr_key).get(material, 1.8 if op_key == "st30_turning" else 0.8)
 
         cycle = max((volume / mrr / 60.0), 0.25) if volume > 0 and mrr > 0 else 0.25
+        cycle *= _tolerance_factor(geometry.get("tightest_tolerance_in"), C)
         run = cycle / ramp * quantity
         t = setup_times.get(op_key, 0.65) + run
         total_time += t

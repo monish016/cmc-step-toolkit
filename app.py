@@ -158,6 +158,65 @@ DENSITY_TO_MATERIAL = {
 }
 
 
+# Standard round bar sizes (in): 1/16 steps to 2", 1/8 to 4", 1/4 to 8", 1/2 to 12"
+_BAR_SIZES = ([i / 16 for i in range(4, 33)] + [2 + i / 8 for i in range(1, 17)] +
+              [4 + i / 4 for i in range(1, 17)] + [8 + i / 2 for i in range(1, 9)])
+_DENSITY_LB_IN3 = {"stainless": 0.289, "carbon": 0.284, "aluminum": 0.098,
+                   "copper": 0.323, "brass": 0.307, "galvanized": 0.284}
+
+
+def _build_drawing_cost_geometry(drawing_data):
+    """Cost-engine input for a machined (turned) part read from a PDF drawing.
+
+    Returns (geometry, material_name) or (None, None) when there isn't enough data.
+    """
+    st = drawing_data.get("machined_stock") or {}
+    od, length = st.get("od_in"), st.get("overall_length_in")
+    if not od or not length:
+        return None, None
+    fam = None
+    for m in drawing_data.get("materials", []) or []:
+        fam = m.get("family") or fam
+        if fam:
+            break
+    material_name = {"stainless": "Stainless Steel", "aluminum": "Aluminum 6061", "copper": "Copper",
+                     "brass": "Brass", "galvanized": "Galvanized Steel"}.get(fam, "Mild/Carbon Steel")
+    dens = _DENSITY_LB_IN3.get(fam, 0.284)
+
+    cleanup = 0.0625                           # min stock over finished OD
+    bar = next((b for b in _BAR_SIZES if b >= od + cleanup - 1e-9), round(od + 0.25, 3))
+    stock_len = length + 0.25                   # facing + saw kerf
+    area = math.pi / 4
+    skim = area * (bar ** 2 - od ** 2) * length
+    title = ((drawing_data.get("part_info") or {}).get("title") or "").upper()
+    ends = 2 if ("SHAFT" in title or "AXLE" in title) else 1
+    steps = 0.0
+    step_notes = []
+    for d in st.get("diameters_in") or []:
+        if d < od - 1e-6:
+            step_len = 1.5 * d
+            steps += area * (od ** 2 - d ** 2) * step_len * ends
+            step_notes.append(f'{d}" x {step_len:.2f}" long' + (" each end" if ends == 2 else ""))
+    facing = area * bar ** 2 * 0.125
+    removed = skim + steps + facing
+    weight = area * bar ** 2 * stock_len * dens
+
+    assumptions = [f'Bar stock {bar:.4g}" dia x {stock_len:.2f}" (next standard size over {od}" OD + cleanup)']
+    if step_notes:
+        assumptions.append("Turned-down steps estimated at 1.5 x diameter: " + "; ".join(step_notes))
+    geo = {
+        "fab_type": "machined",
+        "turning_hint": True,
+        "dims": {"length": stock_len, "width": bar, "height": bar},
+        "weight_lb": round(weight, 3),
+        "volume_in3": round(removed, 3),
+        "tightest_tolerance_in": drawing_data.get("tightest_tolerance_in"),
+        "cost_assumptions": assumptions,
+        "bar_stock_in": bar,
+    }
+    return geo, material_name
+
+
 def _build_cost_geometry(geometry):
     """Convert STEP extraction JSON into the dict that cost_engine.estimate_cost() expects."""
     fab_type = geometry.get("fab_type", "sheet_metal")
@@ -683,7 +742,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-<div class="footer">Chicago Metalcraft Quoting Toolkit v3.9</div>
+<div class="footer">Chicago Metalcraft Quoting Toolkit v4.0 &middot; <a href="/regression" style="color:#888">Regression tests</a></div>
 
 <script>
 // --- Utility ---
@@ -1353,6 +1412,10 @@ function renderDrawingResult(r, idx) {
       html += '<tr><td>' + label + '</td><td>' + (f.count || 1) + '</td><td>' + size + '</td><td style="color:#666;font-size:0.75rem">' + (f.raw || '') + '</td></tr>';
     });
     html += '</table>';
+  }
+
+  if (r.cost_estimate) {
+    html += renderCostEstimate(r.cost_estimate);
   }
 
   // Download buttons - STEP-style row with combined PDF prominent
@@ -2840,6 +2903,17 @@ def analyze():
         if "error" in drawing_data:
             return jsonify({"error": drawing_data["error"]}), 500
 
+        # Cost estimate for machined (turned) parts read from the drawing
+        try:
+            if drawing_data.get("likely_fab_type") == "machined":
+                dgeo, dmat = _build_drawing_cost_geometry(drawing_data)
+                if dgeo:
+                    drawing_data["cost_estimate"] = cost_engine.estimate_cost(
+                        dgeo, dmat, quantity, config=_get_config())
+                    drawing_data["cost_estimate"]["bar_stock_in"] = dgeo["bar_stock_in"]
+        except Exception as dce:
+            print(f"Warning: drawing cost estimate failed (non-fatal): {dce}")
+
         # Generate flat pattern image from drawing data
         flat_path = os.path.join(job_dir, "flat_pattern.png")
         try:
@@ -2907,7 +2981,10 @@ def analyze():
         except Exception as db_err:
             print(f"Warning: Failed to save job to DB: {db_err}")
 
-        return jsonify({"drawing_data": drawing_data, "files": files, "job_id": job_id})
+        resp = {"drawing_data": drawing_data, "files": files, "job_id": job_id}
+        if drawing_data.get("cost_estimate"):
+            resp["cost_estimate"] = drawing_data["cost_estimate"]
+        return jsonify(resp)
 
     # ---- CAD format conversion (SLDPRT/SLDASM/IGS/IGES -> STEP) ----
     if is_native_cad:
@@ -3738,6 +3815,120 @@ def config_template():
     buf.seek(0)
     return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                      as_attachment=True, download_name="CMC_Shop_Rates_Template.xlsx")
+
+
+# ── Regression test page ────────────────────────────────────────────────
+# Fixture files are matched by SHA-256 against regression_expected.json, so no
+# customer drawings live in the (public) repo.  Drop the files, press Run.
+
+REGRESSION_HTML = r"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>CMC Toolkit - Regression Tests</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;background:#f3f4f6;margin:0;color:#1a1a1a}
+header{background:#1a3a1a;color:#fff;padding:14px 24px;font-size:18px;font-weight:600}
+main{max-width:1100px;margin:20px auto;background:#fff;border-radius:8px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.drop{border:2px dashed #9ab09a;border-radius:8px;padding:22px;text-align:center;color:#555;cursor:pointer}
+button{background:#2a5a2a;color:#fff;border:0;border-radius:6px;padding:9px 18px;font-size:14px;cursor:pointer;margin-top:12px}
+button:disabled{background:#999}
+table{border-collapse:collapse;width:100%;margin-top:14px;font-size:13px}
+th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top}
+th{background:#f0f6f0}
+.pass{color:#1b7a1b;font-weight:700}.fail{color:#b00020;font-weight:700}.unk{color:#8a6d00;font-weight:700}
+.small{color:#666;font-size:12px}
+pre{white-space:pre-wrap;font-size:11px;background:#fafafa;border:1px solid #eee;padding:6px;margin:4px 0 0}
+#summary{font-size:15px;font-weight:600;margin-top:12px}
+</style></head><body>
+<header>CMC Quoting Toolkit - Regression Tests</header>
+<main>
+<p>Drop the regression fixture files (STEP and PDF). Each file runs through the live analysis pipeline and is checked
+against the expected values recorded for it. Files are matched by content hash, not by name.</p>
+<div class="drop" id="drop">Click or drop fixture files here<br><span class="small" id="picked">No files selected</span></div>
+<input type="file" id="files" multiple style="display:none" accept=".step,.stp,.pdf,.sldprt,.igs,.iges">
+<button id="run" disabled>Run tests</button>
+<div id="summary"></div>
+<table id="tbl" style="display:none"><thead><tr><th>Result</th><th>Test</th><th>File</th><th>Details</th><th>Time</th></tr></thead><tbody></tbody></table>
+</main>
+<script>
+var picked = [];
+var fileEl = document.getElementById('files');
+var dropEl = document.getElementById('drop');
+function setFiles(list) {
+  picked = Array.prototype.slice.call(list);
+  document.getElementById('picked').textContent = picked.length + ' file(s): ' + picked.map(function(f){return f.name;}).join(', ');
+  document.getElementById('run').disabled = picked.length === 0;
+}
+dropEl.onclick = function() { fileEl.click(); };
+fileEl.onchange = function() { setFiles(fileEl.files); };
+dropEl.ondragover = function(e) { e.preventDefault(); };
+dropEl.ondrop = function(e) { e.preventDefault(); setFiles(e.dataTransfer.files); };
+function esc(v) { return String(v).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;'); }
+function fmt(v) { return v === null || v === undefined ? 'null' : (typeof v === 'object' ? JSON.stringify(v) : String(v)); }
+async function sha256(file) {
+  var buf = await file.arrayBuffer();
+  var h = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(h)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+}
+document.getElementById('run').onclick = async function() {
+  var btn = this; btn.disabled = true;
+  var tb = document.querySelector('#tbl tbody'); tb.innerHTML = '';
+  document.getElementById('tbl').style.display = '';
+  var pass = 0, fail = 0, unk = 0;
+  for (var i = 0; i < picked.length; i++) {
+    var f = picked[i];
+    document.getElementById('summary').textContent = 'Running ' + (i+1) + '/' + picked.length + ': ' + f.name + ' ...';
+    var t0 = Date.now();
+    var sha = await sha256(f);
+    var fd = new FormData();
+    fd.append('step_file', f); fd.append('density', '7.9'); fd.append('k_factor', '0.44'); fd.append('quantity', '1');
+    var resp;
+    try { var r = await fetch('/analyze', {method: 'POST', body: fd}); resp = await r.json(); }
+    catch (e) { resp = {error: String(e)}; }
+    var chk;
+    try {
+      var r2 = await fetch('/regression/check', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sha: sha, response: resp})});
+      chk = await r2.json();
+    } catch (e) { chk = {known: false, summary: {error: String(e)}}; }
+    var secs = ((Date.now() - t0) / 1000).toFixed(1) + 's';
+    var res, label, details;
+    if (!chk.known) {
+      unk++; res = '<span class="unk">NEW</span>'; label = '(not in test set)';
+      details = 'Add to regression_expected.json with key <code>' + sha + '</code>:<pre>' + esc(JSON.stringify(chk.summary, null, 1)) + '</pre>';
+    } else {
+      if (chk.passed) { pass++; res = '<span class="pass">PASS</span>'; } else { fail++; res = '<span class="fail">FAIL</span>'; }
+      label = esc(chk.label) + '<div class="small">' + esc(chk.status) + (chk.note ? ' - ' + esc(chk.note) : '') + '</div>';
+      details = chk.rows.map(function(row) {
+        return (row.ok ? '<span class="pass">ok</span> ' : '<span class="fail">x</span> ') + esc(row.key) + ': ' +
+          (row.ok ? esc(fmt(row.actual)) : 'expected ' + esc(fmt(row.expected)) + ', got ' + esc(fmt(row.actual)));
+      }).join('<br>');
+    }
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + res + '</td><td>' + label + '</td><td>' + esc(f.name) + '</td><td>' + details + '</td><td>' + secs + '</td>';
+    tb.appendChild(tr);
+  }
+  document.getElementById('summary').innerHTML = '<span class="pass">' + pass + ' passed</span> &nbsp; <span class="fail">' + fail +
+    ' failed</span> &nbsp; <span class="unk">' + unk + ' new</span>';
+  btn.disabled = false;
+};
+</script></body></html>"""
+
+
+@app.route("/regression")
+def regression_page():
+    from flask import Response
+    return Response(REGRESSION_HTML, mimetype="text/html")
+
+
+@app.route("/regression/check", methods=["POST"])
+def regression_check():
+    try:
+        import regression
+        body = request.get_json(force=True) or {}
+        summary = regression.summarize_response(body.get("response") or {})
+        return jsonify(regression.check(body.get("sha", ""), summary))
+    except Exception as e:
+        return jsonify({"known": False, "summary": {"error": f"regression check failed: {e}"}}), 200
 
 
 @app.route("/history")

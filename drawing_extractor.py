@@ -116,10 +116,11 @@ def _compile_patterns():
         ),
         # Material callouts
         "material_steel": re.compile(
-            r'\b(30[14]L?|316L?|40[19]|430|SUS\s*30[14])\b'
+            r'\b(30[1-4]L?|316L?|409|41[06]|420|430|440C?|SUS\s*30[14])\b'
             r'|\b(SS\s*30[14]L?|SS\s*316L?)\b'
             r'|\b(A-?36|ASTM\s*A-?36)\b'
-            r'|\b(10[12][\d]|1045)\s*(?:CRS|HRS|STEEL|STL)?\b'
+            r'|\b(?:AISI|SAE|UNS\s*G)\s*-?(10[12]\d|1045)\b'
+            r'|\b(10[12]\d|1045)\s*(?:CRS|HRS|STEEL|STL)\b'
             r'|\b(CRS|HRS|HRPO|CR\s*STEEL|HR\s*STEEL)\b'
             r'|\bSTAINLESS\s*(?:STEEL)?\b'
             r'|\bMILD\s*STEEL\b'
@@ -208,7 +209,19 @@ PATTERNS = _compile_patterns()
 def extract_text_from_pdf(pdf_path):
     """Extract text from all pages of a PDF."""
     if fitz is None:
-        raise ImportError("PyMuPDF (fitz) is required. Install with: pip install PyMuPDF")
+        # Fallback for environments without PyMuPDF (local testing)
+        try:
+            import pdfplumber
+        except ImportError:
+            raise ImportError("PyMuPDF (fitz) is required. Install with: pip install PyMuPDF")
+        pages, full_text = [], ""
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, pg in enumerate(pdf.pages):
+                t = pg.extract_text() or ""
+                pages.append({"page": i + 1, "text": t, "has_text": len(t.strip()) > 20})
+                full_text += t + "\n"
+        text_pages = sum(1 for p in pages if p["has_text"])
+        return full_text, pages, text_pages < len(pages) * 0.3
 
     doc = fitz.open(pdf_path)
     pages = []
@@ -361,6 +374,17 @@ def find_thickness(text, material_family=None):
                     })
             except ValueError:
                 pass
+
+    # Metric sheet callouts: "1.5mm Sheet Steel", "3 MM PLATE", "2.0mm THK"
+    for m in re.finditer(r'(?<![\d.])(\d{1,2}(?:[.,]\d{1,2})?)\s*MM\s*(?:\(|\b)?\s*(?:SHEET|PLATE|THK|THICK(?:NESS)?)\b',
+                         text, re.IGNORECASE):
+        try:
+            mm = float(m.group(1).replace(',', '.'))
+        except ValueError:
+            continue
+        if 0.3 <= mm <= 25:
+            results.append({"value_in": round(mm / 25.4, 4), "gauge": None,
+                            "raw": m.group(0).strip(), "unit": "mm", "value_mm": mm})
 
     # Contextual thickness: if drawing has bends but no explicit thickness yet,
     # look for standalone dimensions matching standard sheet metal gauges.
@@ -1065,6 +1089,15 @@ def identify_missing_info(result):
             "field": "Material",
             "message": "No material callout found on drawing. Ask customer for material specification."
         })
+
+    if result.get("likely_fab_type") == "sheet_metal":
+        n_ang = len((result.get("bends") or {}).get("angles", []))
+        if n_ang:
+            missing.append({
+                "field": "Bend count (verify)",
+                "message": f"{n_ang} bend(s) found from bend callouts on the drawing. Bends without a "
+                           "callout can't be detected from a PDF - confirm against the views or upload the STEP."
+            })
 
     if result.get("likely_fab_type") == "machined":
         st = result.get("machined_stock") or {}
