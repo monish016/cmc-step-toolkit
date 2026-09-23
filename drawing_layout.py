@@ -26,12 +26,80 @@ except ImportError:  # pragma: no cover
 
 # ── Word extraction ────────────────────────────────────────────────────
 
+def _words_from_chars(chars):
+    """Build words from characters given in content-stream order.
+
+    Each char: {"c", "x0", "x1", "oy" (baseline y), "size", "upright"}.
+    PyMuPDF only splits words at space characters, so text that is merely
+    *positioned* apart (stacked limits like "F7" / "-.001", or cells packed into
+    one text object) would otherwise merge.  We also split on horizontal gaps,
+    backward jumps and baseline changes.  Word boxes are derived from the
+    baseline and font size (height = size), matching pdfplumber's geometry.
+    """
+    words = []
+    cur = []
+
+    def flush():
+        if not cur:
+            return
+        size = max(ch["size"] for ch in cur)
+        oy = sum(ch["oy"] for ch in cur) / len(cur)
+        words.append({"text": "".join(ch["c"] for ch in cur),
+                      "x0": min(ch["x0"] for ch in cur), "x1": max(ch["x1"] for ch in cur),
+                      "top": oy - 0.8 * size, "bottom": oy + 0.2 * size,
+                      "size": size, "upright": cur[0]["upright"]})
+        cur.clear()
+
+    # Rotated text: keep stream order (only used for the upright checks)
+    for ch in chars:
+        if ch["upright"] or ch["size"] <= 0:
+            continue
+        if ch["c"].isspace():
+            flush()
+        else:
+            if cur and abs(ch["size"] - cur[-1]["size"]) > 0.6:
+                flush()
+            cur.append(ch)
+    flush()
+
+    # Upright text: group by baseline + font size geometrically, then read left to right.
+    ups = [ch for ch in chars if ch["upright"] and ch["size"] > 0 and ch["x1"] > ch["x0"] - 0.01
+           and not (ch["x0"] == 0 and ch["x1"] == 0)]
+    ups.sort(key=lambda ch: (ch["oy"], ch["x0"]))
+    rows = []
+    for ch in ups:
+        placed = False
+        for row in rows[-6:]:
+            if abs(row["oy"] - ch["oy"]) <= 0.25 * max(row["size"], ch["size"]) and \
+                    abs(row["size"] - ch["size"]) <= 0.6:
+                row["chars"].append(ch)
+                placed = True
+                break
+        if not placed:
+            rows.append({"oy": ch["oy"], "size": ch["size"], "chars": [ch]})
+    for row in rows:
+        row["chars"].sort(key=lambda ch: ch["x0"])
+        for ch in row["chars"]:
+            if ch["c"].isspace():
+                flush()
+                continue
+            if cur:
+                prev = cur[-1]
+                sz = max(prev["size"], ch["size"], 0.1)
+                gap = ch["x0"] - prev["x1"]
+                if gap > 0.25 * sz or gap < -0.4 * sz or abs(ch["size"] - prev["size"]) > 0.2:
+                    flush()
+            cur.append(ch)
+        flush()
+    return words
+
+
 def _words_from_fitz(pdf_path):
     pages = []
     doc = fitz.open(pdf_path)
     try:
         for page in doc:
-            words = []
+            chars = []
             raw = page.get_text("rawdict")
             for block in raw.get("blocks", []):
                 for line in block.get("lines", []):
@@ -39,29 +107,18 @@ def _words_from_fitz(pdf_path):
                     upright = abs(ldir[0] - 1.0) < 0.01 and abs(ldir[1]) < 0.01
                     for span in line.get("spans", []):
                         size = float(span.get("size", 0))
-                        cur, box = [], None
                         for ch in span.get("chars", []):
-                            c = ch.get("c", "")
                             x0, y0, x1, y1 = ch["bbox"]
-                            if c.isspace():
-                                if cur:
-                                    words.append(_mk(cur, box, size, upright))
-                                cur, box = [], None
-                                continue
-                            cur.append(c)
-                            box = [x0, y0, x1, y1] if box is None else [
-                                min(box[0], x0), min(box[1], y0), max(box[2], x1), max(box[3], y1)]
-                        if cur:
-                            words.append(_mk(cur, box, size, upright))
-            pages.append(words)
+                            oy = ch.get("origin", (x0, y1))[1]
+                            chars.append({"c": ch.get("c", ""), "x0": x0, "x1": x1, "oy": oy,
+                                          "size": size, "upright": upright})
+                        # span boundary = word boundary
+                        chars.append({"c": " ", "x0": 0, "x1": 0, "oy": 0, "size": size, "upright": upright})
+                    chars.append({"c": " ", "x0": 0, "x1": 0, "oy": 0, "size": 0, "upright": upright})
+            pages.append(_words_from_chars(chars))
     finally:
         doc.close()
     return pages
-
-
-def _mk(chars, box, size, upright):
-    return {"text": "".join(chars), "x0": box[0], "top": box[1], "x1": box[2],
-            "bottom": box[3], "size": size, "upright": upright}
 
 
 def _words_from_pdfplumber(pdf_path):
@@ -318,7 +375,7 @@ def read_title_block(words):
             for c in words:
                 if id(c) in used or not c["upright"] or abs(c["size"] - best_val["size"]) > 0.6:
                     continue
-                if 0 <= c["top"] - prev[0]["bottom"] <= 0.6 * _h(prev[0]) and abs(c["x0"] - line[0]["x0"]) <= 3:
+                if 0.5 * _h(prev[0]) <= c["top"] - prev[0]["top"] <= 1.6 * _h(prev[0]) and abs(c["x0"] - line[0]["x0"]) <= 3:
                     nxt_first = c
                     break
             if nxt_first is None:
