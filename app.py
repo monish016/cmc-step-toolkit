@@ -823,7 +823,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div style="max-width:800px">
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v4.1 - September 23, 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v4.1 - September 25, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Drawing Pricing, DXF Support, TL-2 Routing</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Sheet-metal PDF drawings are now priced: flat size read from the drawing dimensions (flat-pattern view detected automatically), plus thickness, holes, taps and bends</li>
@@ -841,7 +841,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v4.0 - September 23, 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v4.0 - September 24, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Regression Tests + Machined-Part Quoting from Drawings</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>New Regression Tests page (/regression): every reported problem file is re-checked against expected values after each deploy</li>
@@ -855,7 +855,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div style="border-left:3px solid #2e7d32;padding-left:16px;margin-bottom:24px">
-          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9.3 - September 23, 2026</div>
+          <div style="font-weight:700;font-size:1.1rem;color:#2e7d32">v3.9.3 - September 24, 2026</div>
           <div style="color:#666;font-size:0.85rem;margin-bottom:6px">Drawing Reading by Position + ISO 286 Fits</div>
           <ul style="margin:6px 0;padding-left:18px;color:#333">
             <li>Title block read by position: drawing number, part title, material callout, finish, quantity and revision</li>
